@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_app.contracts.prompt import PromptContributionEvent, PromptSection
+from agent_app.contracts.prompt import PromptSection
 from agent_app.plugins.memory.prompts import MEMORY_GUIDANCE
 from agent_app.plugins.memory.config import PluginConfig
 from icarus.core.plugin import handles
@@ -97,6 +97,9 @@ class MemoryPlugin(BasePlugin):
         ] = OrderedDict()
         self._result_lock = RLock()
 
+    def static_prompt_sections(self):
+        return (PromptSection("memory-use", "session", MEMORY_GUIDANCE),)
+
     @handles(UserInputEvent, TaskContextInputResultEvent)
     async def on_event(self, source_plugin_id: str, event: Event) -> None:
         if isinstance(event, TaskContextInputResultEvent):
@@ -106,9 +109,6 @@ class MemoryPlugin(BasePlugin):
             return
         if not isinstance(event, UserInputEvent) or not self._accepting_recall:
             return
-        if event.task_id is not None:
-            await self.publish(PromptContributionEvent(task_id=event.task_id, status="completed",
-                sections=(PromptSection("memory-use", "contributor", MEMORY_GUIDANCE),)))
         task = self.start_background_work(
             lambda: self._automatic_recall(event),
             name=f"automatic-recall:{event.task_id}",

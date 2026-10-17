@@ -64,7 +64,7 @@ class PromptPlugin(BasePlugin):
         self._required = required_sources
         for source, sections in static_sections.items():
             try:
-                self._validate_sections(sections, ("persona",))
+                self._validate_sections(sections, ("session", "persona"))
                 self._static[source] = tuple(sections)
             except PromptError:
                 if source in required_sources:

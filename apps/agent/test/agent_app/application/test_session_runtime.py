@@ -151,6 +151,74 @@ class MemoryAwareAgent:
         )
 
 
+def test_session_static_guidance_is_in_system_not_each_user_prompt(tmp_path, monkeypatch):
+    from agent_app.plugins.memory.mem0_http_adapter import Mem0HttpAdapter
+
+    async def empty_recall(self, query, **kwargs):
+        return MemoryRecallResult((), query)
+
+    monkeypatch.setattr(Mem0HttpAdapter, "arecall", empty_recall)
+
+    async def run():
+        captured = []
+
+        class CaptureAgent:
+            async def astream(self, **kwargs):
+                captured.append((kwargs["system_prompt"], kwargs["input_prompt"]))
+                message = Message("assistant", [TextPart("ok")])
+                yield AgentCompletedEvent(
+                    step=1,
+                    response=AgentResponse(
+                        message=message, usage=Usage(10, 2), last_usage=Usage(10, 2),
+                        finish_reason="stop", steps=1,
+                        messages=[Message("user", [TextPart(kwargs["input_prompt"])]), message],
+                        task_message_start=0,
+                    ),
+                )
+
+        updates = []
+        async def publish(update):
+            updates.append(update)
+
+        runtime = SessionRuntime(
+            SessionIdentity.create(tmp_path, "static-guidance"),
+            config=make_config(tmp_path / "data"),
+            publish_update=publish,
+        )
+        await runtime.start()
+        runtime.runtime_host.get_plugin("agent").agent_factory.get_agent = (
+            lambda role: CaptureAgent()
+        )
+        try:
+            for prompt in ("first", "second"):
+                accepted = await runtime.submit(prompt)
+                for _ in range(200):
+                    if any(
+                        update.type == "task.finished"
+                        and update.task_id == accepted.task_id
+                        for update in updates
+                    ) and not runtime.snapshot().has_work:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    raise AssertionError("task did not finish")
+        finally:
+            await runtime.stop("test", timeout=1)
+        return captured
+
+    captured = asyncio.run(run())
+    assert len(captured) == 2
+    assert captured[0][0] == captured[1][0]
+    for system, user in captured:
+        assert "## session/" in system
+        for section in (
+            "builtin-tool-use", "knowledge-use", "memory-use",
+            "process-use", "skill-discovery",
+        ):
+            assert section in system
+            assert section not in user
+
+
 def test_session_runtime使用runtime_update并保留单session行为(tmp_path):
     async def run():
         updates = []

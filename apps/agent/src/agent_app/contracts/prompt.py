@@ -9,8 +9,8 @@ from icarus.core.capabilities.catalog import CapabilityContract
 from icarus.core.events import Event
 
 
-PromptLayer = Literal["base", "workspace", "persona", "external", "mode", "contributor", "runtime"]
-STATIC_LAYERS = ("base", "workspace", "persona", "external")
+PromptLayer = Literal["base", "workspace", "session", "persona", "external", "mode", "contributor", "runtime"]
+STATIC_LAYERS = ("base", "workspace", "session", "persona", "external")
 DYNAMIC_LAYERS = ("mode", "contributor", "runtime")
 SESSION_INSTRUCTIONS_TYPE = "session.instructions"
 

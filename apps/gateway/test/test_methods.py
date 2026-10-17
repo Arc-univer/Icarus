@@ -20,7 +20,7 @@ class RuntimeStub:
 
     def validate_session_instructions(self, instructions):
         from agent_app.plugins.prompt.composer import validate_instructions
-        validate_instructions(instructions, max_tokens=4096)
+        validate_instructions(instructions, max_tokens=8192)
 
     async def create_session(self, workspace_path, session_id=None, *, load_runtime=True, instructions=None):
         self.created = (workspace_path, session_id)

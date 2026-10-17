@@ -26,7 +26,7 @@ def test_create_instructions_persist_but_are_not_public(tmp_path, instructions):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("instructions", ["x" * 4097, "😀" * 4096, "\ud800", 123, []])
+@pytest.mark.parametrize("instructions", ["x" * 8193, "😀" * 8192, "\ud800", 123, []])
 def test_invalid_instructions_are_rejected_before_create_without_echo(tmp_path, instructions):
     async def run():
         runtime = AgentRuntime(config_loader=lambda: make_config(tmp_path / "data"))

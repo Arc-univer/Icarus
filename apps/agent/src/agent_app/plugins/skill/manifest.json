@@ -3,7 +3,6 @@
   "plugin_id": "skill",
   "plugin_version": "1.0.0",
   "entrypoint": "agent_app.plugins.skill.factory:create_plugin",
-  "contracts": "agent_app.contracts.prompt",
   "python_requires": [
     "PyYAML>=6,<7"
   ],
@@ -26,11 +25,9 @@
     "skill_job_status"
   ],
   "published_events": [
-    "prompt.contribution",
     "task.context_input"
   ],
   "consumed_events": [
-    "input.user_input",
     "task.context_input_result"
   ],
   "state_scopes": [

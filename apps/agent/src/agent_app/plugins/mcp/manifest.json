@@ -3,7 +3,6 @@
   "plugin_id": "mcp",
   "plugin_version": "1.0.0",
   "entrypoint": "agent_app.plugins.mcp.factory:create_plugin",
-  "contracts": "agent_app.contracts.prompt",
   "python_requires": [
     "fastmcp-slim[client]==4.0.3",
     "jsonschema>=4,<5"
@@ -15,8 +14,8 @@
     "mcp_tool_search",
     "mcp_tool_execute"
   ],
-  "published_events": ["prompt.contribution"],
-  "consumed_events": ["input.user_input"],
+  "published_events": [],
+  "consumed_events": [],
   "state_scopes": [],
   "tier": "external",
   "required_config": []

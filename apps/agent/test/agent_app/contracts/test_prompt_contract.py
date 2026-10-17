@@ -49,6 +49,15 @@ def test_prompt_sections_reject_invalid_values(section_id, layer, content):
         module.PromptSection(section_id, layer, content)
 
 
+def test_session_layer_is_static_and_ordered_with_other_system_layers():
+    module = contracts()
+    assert "session" in module.STATIC_LAYERS
+    assert module.STATIC_LAYERS.index("workspace") < module.STATIC_LAYERS.index("session")
+    assert module.STATIC_LAYERS.index("session") < module.STATIC_LAYERS.index("persona")
+    assert module.STATIC_LAYERS[-1] == "external"
+    assert module.PromptSection("guide", "session", "stable guidance")
+
+
 def test_contributor_only_requires_static_initialization():
     module = contracts()
 

@@ -81,8 +81,8 @@ def test_required_duplicate_section_is_invalid():
 
 def test_prompt_configuration_rejects_inconsistent_or_unbounded_budgets():
     config = module("config").PluginConfig
-    assert config().max_prompt_tokens == 8192
-    assert config().max_section_tokens == 4096
+    assert config().max_prompt_tokens == 12288
+    assert config().max_section_tokens == 8192
     for values in ({"max_prompt_tokens": 1}, {"contributor_timeout_seconds": float("inf")}, {"required_contributors": ["p", "p"]}):
         with pytest.raises(ValueError):
             config(**values)

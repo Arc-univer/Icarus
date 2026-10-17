@@ -97,7 +97,7 @@ def test_lazy_create_validates_without_loading_and_survives_restart(tmp_path):
         identity = SessionIdentity.create(tmp_path, "session")
         try:
             with pytest.raises(PromptError):
-                await runtime.create_session(tmp_path, "oversize", instructions="x" * 4097, load_runtime=False)
+                await runtime.create_session(tmp_path, "oversize", instructions="x" * 8193, load_runtime=False)
             assert not await runtime._store().session_exists(SessionIdentity.create(tmp_path, "oversize"))
             await runtime.create_session(tmp_path, "session", instructions=PRIVATE, load_runtime=False)
             assert created == []

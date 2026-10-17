@@ -121,7 +121,7 @@ def test_prompt_contributor_to_model_and_private_instructions_survive_real_gatew
         assert any("DYNAMIC-FROM-PLUGIN" in str(message["content"]) for message in call["messages"] if message["role"] == "user")
 
 
-def test_builtin_plugin_guidance_reaches_user_context_not_base_system(tmp_path):
+def test_builtin_plugin_guidance_reaches_system_once_not_user_context(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     skill_dir = workspace / "skills" / "e2e-guide"
@@ -135,13 +135,13 @@ def test_builtin_plugin_guidance_reaches_user_context_not_base_system(tmp_path):
     call = next(payload for path, payload in ProviderHandler.requests if path.endswith("/chat/completions"))
     system = next(message["content"] for message in call["messages"] if message["role"] == "system")
     user = next(message["content"] for message in call["messages"] if message["role"] == "user")
-    assert "长期记忆" not in system
-    assert len(system) < 800
-    assert "你自己的长期记忆" in user
     for section in ("builtin-tool-use", "knowledge-use", "mcp-use", "memory-use", "process-use", "skill-discovery"):
-        assert section in user
-    assert "mcp_tool_search" in user
-    assert "当前未开放" in user
-    assert "e2e-guide" in user
-    assert "BODY-NOT-AUTO-INJECTED" not in user
+        assert f"## session/" in system
+        assert section in system
+        assert section not in user
+    assert "你自己的长期记忆" in system
+    assert "mcp_tool_search" in system
+    assert "当前未开放" in system
+    assert "e2e-guide" in system
+    assert "BODY-NOT-AUTO-INJECTED" not in system
     assert not any(path.endswith("/mcp") for path, _ in ProviderHandler.requests)
