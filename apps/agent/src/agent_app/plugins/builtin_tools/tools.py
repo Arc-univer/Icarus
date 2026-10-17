@@ -1,9 +1,9 @@
 """内置 Agent 工具。"""
 
-from agent_app.tools.builtin.bash_tool import BashTool
-from agent_app.tools.builtin.insert_tool import InsertTool
-from agent_app.tools.builtin.read_tool import ReadTool
-from agent_app.tools.builtin.write_tool import WriteTool
+from agent_app.plugins.builtin_tools.bash_tool import BashTool
+from agent_app.plugins.builtin_tools.insert_tool import InsertTool
+from agent_app.plugins.builtin_tools.read_tool import ReadTool
+from agent_app.plugins.builtin_tools.write_tool import WriteTool
 
 
 def create_builtin_tools(

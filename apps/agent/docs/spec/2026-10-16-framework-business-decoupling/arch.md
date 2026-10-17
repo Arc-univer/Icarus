@@ -18,7 +18,6 @@ apps/agent/src/
     ├── config/
     ├── model_provider/
     ├── plugins/    11个具体插件
-    ├── tools/builtin/
     ├── utils/
     └── resources/
 ```

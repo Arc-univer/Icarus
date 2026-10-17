@@ -476,7 +476,7 @@ async def _spawn_bash(command: str, workdir: str | None):
     )
     job = None
     if os.name == "nt":
-        from agent_app.tools.builtin.windows_process import (
+        from agent_app.plugins.builtin_tools.windows_process import (
             WindowsProcessJob,
         )
 

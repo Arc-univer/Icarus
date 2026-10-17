@@ -2,7 +2,7 @@ from icarus.runtime import PluginRegistration
 from agent_app.plugins.builtin_tools.plugin import (
     BuiltinToolsPlugin,
 )
-from agent_app.tools.builtin import create_builtin_tools
+from agent_app.plugins.builtin_tools.tools import create_builtin_tools
 
 
 def create_plugin(

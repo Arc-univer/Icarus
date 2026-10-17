@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from agent_app.tools.builtin import (
+from agent_app.plugins.builtin_tools import (
     BashTool,
     InsertTool,
     ReadTool,
@@ -266,7 +266,7 @@ def test_bash_终止超时后kill并回收子进程():
 
 @pytest.mark.parametrize("async_mode", [False, True])
 def test_bash_unavailable_returns_failure(monkeypatch, async_mode):
-    from agent_app.tools.builtin import bash_tool
+    from agent_app.plugins.builtin_tools import bash_tool
 
     def missing():
         raise FileNotFoundError("Bash is unavailable")
