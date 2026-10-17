@@ -114,6 +114,21 @@ def bind_background(target, published):
     )
 
 
+def test_memory按事件契约接受事件而不依赖兄弟插件ID():
+    memory = plugin(BackendStub())
+
+    assert memory.accepts_event(
+        "another-plugin",
+        UserInputEvent(prompt="hello", task_id="task"),
+    ) is True
+    assert memory.accepts_event(
+        "another-plugin",
+        TaskContextInputResultEvent(
+            task_id="task", request_event_id="request", status="accepted",
+        ),
+    ) is True
+
+
 def test_memory_context将召回内容表达为agent自己的长期记忆():
     context = _context_packet((item(content="用户喜欢简短回答"),))
 

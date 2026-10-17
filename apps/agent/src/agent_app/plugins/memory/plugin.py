@@ -95,15 +95,6 @@ class MemoryPlugin(BasePlugin):
         ] = OrderedDict()
         self._result_lock = RLock()
 
-    def accepts_event(self, source_plugin_id: str, event: Event) -> bool:
-        return (
-            source_plugin_id == "user-input"
-            and isinstance(event, UserInputEvent)
-        ) or (
-            source_plugin_id == "agent"
-            and isinstance(event, TaskContextInputResultEvent)
-        )
-
     @handles(UserInputEvent, TaskContextInputResultEvent)
     async def on_event(self, source_plugin_id: str, event: Event) -> None:
         if isinstance(event, TaskContextInputResultEvent):
