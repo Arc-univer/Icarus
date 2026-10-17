@@ -21,6 +21,7 @@ from icarus.core.hooks import (
 )
 from icarus.runtime import BasePlugin, PluginManager
 from agent_app.plugins.agent.plugin import AgentPlugin
+from icarus.core.llm import InvalidToolCallArgumentsError
 from icarus.core.contracts.context import BlackboardContextReadyEvent
 from icarus.core.run_control import TaskChannelRegistry
 from icarus.core.run_control import (
@@ -695,6 +696,66 @@ def test_agent_plugin为直接异常发布failed终态():
     assert errors[0].fatal is True
     assert errors[0].code == "agent_run_failed"
     assert errors[0].error_message == "agent exploded"
+    assert channel.status.value == "failed"
+
+
+def test_agent_plugin非法工具参数错误携带安全检查点():
+    checkpoint = (
+        Message("user", [TextPart("work")]),
+        Message(
+            "assistant",
+            [],
+            tool_calls=[ToolCall("call-1", "read", {})],
+        ),
+        Message("tool", [TextPart("{}")], tool_call_id="call-1"),
+    )
+
+    class InvalidArgumentsAgent(StubAgent):
+        async def astream(self, *args, run_control=None, **kwargs):
+            del args, kwargs
+            run_control.checkpoint_history(checkpoint, Usage(10, 2))
+            raise InvalidToolCallArgumentsError(
+                tool_name="read",
+                raw_arguments='{"path": ',
+                finish_reason="tool_call",
+                detail="Expecting value",
+            )
+            if False:
+                yield
+
+    async def run():
+        manager = PluginManager()
+        factory = StubAgentFactory()
+        factory.agent = InvalidArgumentsAgent()
+        channels = TaskChannelRegistry()
+        channel = channels.create("task-1")
+        channel.mark_preparing_context()
+        agent_plugin = AgentPlugin("agent", factory, channels)
+        sink = SinkPlugin("sink")
+        for plugin in (agent_plugin, sink):
+            manager.register(plugin)
+        manager.subscribe("sink", "agent")
+        await manager.start()
+        await agent_plugin.consume(
+            "blackboard",
+            BlackboardContextReadyEvent(
+                task_id="task-1",
+                model_role="thinking",
+                system_prompt="",
+                input_prompt="work",
+            ),
+        )
+        await agent_plugin.drain()
+        await manager.stop(timeout=1)
+        return sink.events, channel
+
+    events, channel = asyncio.run(run())
+    errors = [event for event in events if isinstance(event, TaskErrorEvent)]
+
+    assert len(errors) == 1
+    assert errors[0].code == "llm_invalid_tool_arguments"
+    assert errors[0].task_messages == checkpoint
+    assert errors[0].last_usage == Usage(10, 2)
     assert channel.status.value == "failed"
 
 

@@ -165,16 +165,19 @@ class BlackboardPlugin(BasePlugin):
                 state.agent_finished = True
             elif isinstance(event, TaskErrorEvent) and event.fatal:
                 committed = False
-                if (
-                    event.task_messages
-                    and event.task_messages[-1].role == "assistant"
-                    and not event.task_messages[-1].tool_calls
-                ):
-                    committed = await self._commit_task_messages(
-                        state,
-                        event.task_messages,
-                        require_final_assistant=True,
-                    )
+                if event.task_messages:
+                    try:
+                        closed = close_interrupted_run(event.task_messages)
+                    except MessageHistoryError as error:
+                        await self._publish_history_rejection(
+                            state.task_id, error
+                        )
+                    else:
+                        committed = await self._commit_task_messages(
+                            state,
+                            closed,
+                            require_final_assistant=True,
+                        )
                 self._update_context_tokens(committed)
                 state.agent_finished = True
             elif isinstance(event, AgentCancelledEvent):

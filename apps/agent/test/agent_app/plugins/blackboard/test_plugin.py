@@ -731,6 +731,51 @@ def test_blackboard_plugin取消时提交一次安全消息前缀():
         blackboard.get_task_state("task-1")
 
 
+def test_blackboard_plugin致命错误提交安全消息前缀():
+    async def run():
+        blackboard = BlackboardPlugin("blackboard", required_context_sources=set())
+        blackboard.bind_publisher(lambda event: asyncio.sleep(0))
+        await blackboard.consume(
+            "user-input",
+            UserInputEvent(task_id="task-1", prompt="inspect"),
+        )
+        checkpoint = (
+            Message("user", [TextPart("<user_request>\ninspect\n</user_request>")]),
+            Message(
+                "assistant",
+                [],
+                tool_calls=[ToolCall("call-1", "read", {"path": "a"})],
+            ),
+            Message("tool", [TextPart('{"success": true}')], tool_call_id="call-1"),
+        )
+        await blackboard.consume(
+            "agent",
+            TaskErrorEvent(
+                task_id="task-1",
+                fatal=True,
+                code="llm_invalid_tool_arguments",
+                error_type="InvalidToolCallArgumentsError",
+                error_message="bad arguments",
+                step=3,
+                task_messages=checkpoint,
+            ),
+        )
+        await blackboard.consume(
+            "user-input",
+            InputFinishedEvent(task_id="task-1", status="failed"),
+        )
+        return blackboard, checkpoint
+
+    blackboard, checkpoint = asyncio.run(run())
+
+    assert blackboard.get_messages() == [
+        *checkpoint,
+        Message("assistant", [TextPart("Operation interrupted.")]),
+    ]
+    with pytest.raises(KeyError, match="not found"):
+        blackboard.get_task_state("task-1")
+
+
 def test_blackboard_plugin运行中取消时input终态先到仍等待安全历史():
     async def run():
         blackboard = BlackboardPlugin("blackboard", required_context_sources=set())
@@ -1023,7 +1068,7 @@ def test_blackboard_plugin_失败任务不写入跨轮消息():
         blackboard.get_task_state("task-1")
 
 
-def test_blackboard_plugin失败时不提交以tool结束的检查点():
+def test_blackboard_plugin失败时提交已关闭的检查点前缀():
     async def run():
         blackboard = BlackboardPlugin("blackboard", required_context_sources=set())
         blackboard.bind_publisher(lambda event: asyncio.sleep(0))
@@ -1050,7 +1095,15 @@ def test_blackboard_plugin失败时不提交以tool结束的检查点():
         )
         return blackboard.get_messages()
 
-    assert asyncio.run(run()) == []
+    assert asyncio.run(run()) == [
+        Message("user", [TextPart("failed")]),
+        Message(
+            "assistant", [],
+            tool_calls=[ToolCall("call-1", "read", {})],
+        ),
+        Message("tool", [TextPart("done")], tool_call_id="call-1"),
+        Message("assistant", [TextPart("Operation interrupted.")]),
+    ]
 
 
 def test_blackboard_plugin_input完成先到时等待agent结果再提交并清理():

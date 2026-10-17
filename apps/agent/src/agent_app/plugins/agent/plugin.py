@@ -31,6 +31,7 @@ from icarus.core.agents import (
 )
 from icarus.core.events import Event, TaskErrorEvent
 from icarus.core.hooks import HookDispatcher, hook_context
+from icarus.core.llm import InvalidToolCallArgumentsError
 from icarus.core.plugin import BasePlugin
 from icarus.core.contracts.context import (
     BlackboardContextReadyEvent,
@@ -486,22 +487,8 @@ class AgentPlugin(BasePlugin):
                         run_id=channel.run_id,
                         error_type=type(error).__name__,
                         error_message=message,
-                        task_messages=(
-                            channel.history_checkpoint
-                            if code in {
-                                "max_steps_exceeded",
-                                "context_budget_exhausted",
-                            }
-                            else ()
-                        ),
-                        last_usage=(
-                            channel.history_checkpoint_usage
-                            if code in {
-                                "max_steps_exceeded",
-                                "context_budget_exhausted",
-                            }
-                            else None
-                        ),
+                        task_messages=channel.history_checkpoint,
+                        last_usage=channel.history_checkpoint_usage,
                     )
                 )
                 return
@@ -638,6 +625,8 @@ class AgentPlugin(BasePlugin):
 
     @staticmethod
     def _error_details(error: Exception) -> tuple[str, str]:
+        if isinstance(error, InvalidToolCallArgumentsError):
+            return "llm_invalid_tool_arguments", str(error)
         if isinstance(error, ToolContextBudgetExceededError):
             return "context_budget_exhausted", str(error)
         if isinstance(error, MaxStepsExceededError):
