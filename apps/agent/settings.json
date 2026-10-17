@@ -50,21 +50,29 @@
       ]
     }
   },
-  "model_settings": {
-    "thinking": {
+  "model_settings": [
+    {
       "model_name": "deepseek-v4-flash-vision-exp",
       "context_window": 1000000,
       "max_tokens": 9192,
       "temperature": 0.9,
-      "default_think_level": "high"
+      "default_think_level": "high",
+      "name": "thinking"
     },
-    "perception": {
+    {
       "model_name": "deepseek-v4-flash",
       "context_window": 1000000,
       "max_tokens": 9192,
       "temperature": 0.6,
-      "default_think_level": "high"
+      "default_think_level": "high",
+      "name": "perception"
     }
-  },
-  "use_protocol": "openai"
+  ],
+  "use_protocol": "openai",
+  "model_roles": {
+    "agent": "thinking",
+    "compaction": "thinking",
+    "skill_generation": "thinking",
+    "title": "perception"
+  }
 }
