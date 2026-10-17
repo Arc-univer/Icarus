@@ -9,6 +9,32 @@ from icarus.core.models.messages import (
 )
 
 
+class InvalidToolCallArgumentsError(ValueError):
+    """模型返回的 tool call arguments 不是合法的 JSON 对象。"""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        raw_arguments: str,
+        finish_reason: str | None,
+        detail: str,
+    ) -> None:
+        self.tool_name = tool_name
+        self.raw_arguments = raw_arguments
+        self.finish_reason = finish_reason
+        preview = raw_arguments[:200]
+        if len(raw_arguments) > 200:
+            preview += "…"
+        super().__init__(
+            "invalid tool call arguments: "
+            f"tool={tool_name or '<unknown>'} "
+            f"finish_reason={finish_reason} "
+            f"detail={detail} "
+            f"raw={preview!r}"
+        )
+
+
 class BaseLLM(ABC):
     """不同模型协议适配器需要实现的统一调用接口。"""
 

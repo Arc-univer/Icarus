@@ -345,6 +345,76 @@ def test_ainvoke和astream_使用异步客户端():
     assert stream_result[-1].finish_reason == "stop"
 
 
+def test_invoke_非法工具参数抛出类型化错误():
+    from icarus.core.llm import InvalidToolCallArgumentsError
+
+    llm = make_openai_llm()
+    llm._client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    content="",
+                    reasoning_content=None,
+                    reasoning=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_1",
+                            function=SimpleNamespace(
+                                name="get_weather",
+                                arguments='{"city": "Beijing" "unit": "c"}',
+                            ),
+                        )
+                    ],
+                ),
+            )
+        ],
+        usage=None,
+    )
+
+    with pytest.raises(InvalidToolCallArgumentsError) as captured:
+        llm.invoke([Message("user", [TextPart("天气")])])
+
+    error = captured.value
+    assert error.tool_name == "get_weather"
+    assert error.finish_reason == "tool_call"
+    assert error.raw_arguments == '{"city": "Beijing" "unit": "c"}'
+    assert "get_weather" in str(error)
+    assert "raw=" in str(error)
+
+
+def test_stream_非法工具参数抛出类型化错误():
+    from icarus.core.llm import InvalidToolCallArgumentsError
+
+    llm = make_openai_llm()
+    llm._client.chat.completions.create.return_value = iter(
+        [
+            stream_chunk(
+                tool_calls=[
+                    tool_delta(
+                        0,
+                        call_id="call_1",
+                        name="get_weather",
+                        arguments='{"city": "Beijing"',
+                    )
+                ]
+            ),
+            stream_chunk(
+                tool_calls=[tool_delta(0, arguments=' "unit": "c"}')]
+            ),
+            stream_chunk(finish_reason="tool_calls"),
+        ]
+    )
+
+    with pytest.raises(InvalidToolCallArgumentsError) as captured:
+        list(llm.stream([Message("user", [TextPart("天气")])]))
+
+    error = captured.value
+    assert error.tool_name == "get_weather"
+    assert error.finish_reason == "tool_call"
+    assert error.raw_arguments == '{"city": "Beijing" "unit": "c"}'
+
+
 def test_close和aclose_关闭对应客户端():
     llm = make_openai_llm()
     llm._async_client.close = AsyncMock()

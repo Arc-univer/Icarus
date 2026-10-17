@@ -7,7 +7,7 @@ from typing import Any, Callable, cast
 from openai import AsyncOpenAI, OpenAI
 
 from agent_app.config import ThinkMode
-from icarus.core.llm import BaseLLM
+from icarus.core.llm import BaseLLM, InvalidToolCallArgumentsError
 from icarus.core.models.messages import (
     FinishReason,
     ImageAssetUnavailableError,
@@ -93,7 +93,9 @@ class OpenAILLM(BaseLLM):
             completed_calls: list[ToolCall] = []
 
             if finish_reason is not None and tool_calls:
-                completed_calls = self._complete_tool_calls(tool_calls)
+                completed_calls = self._complete_tool_calls(
+                    tool_calls, finish_reason=finish_reason
+                )
                 emitted_tool_calls = True
 
             if (
@@ -113,7 +115,9 @@ class OpenAILLM(BaseLLM):
 
         if tool_calls and not emitted_tool_calls:
             yield LLMStreamChunk(
-                tool_calls=self._complete_tool_calls(tool_calls),
+                tool_calls=self._complete_tool_calls(
+                    tool_calls, finish_reason=None
+                ),
                 finish_reason="tool_call",
             )
 
@@ -146,7 +150,9 @@ class OpenAILLM(BaseLLM):
             completed_calls: list[ToolCall] = []
 
             if finish_reason is not None and tool_calls:
-                completed_calls = self._complete_tool_calls(tool_calls)
+                completed_calls = self._complete_tool_calls(
+                    tool_calls, finish_reason=finish_reason
+                )
                 emitted_tool_calls = True
 
             if (
@@ -166,7 +172,9 @@ class OpenAILLM(BaseLLM):
 
         if tool_calls and not emitted_tool_calls:
             yield LLMStreamChunk(
-                tool_calls=self._complete_tool_calls(tool_calls),
+                tool_calls=self._complete_tool_calls(
+                    tool_calls, finish_reason=None
+                ),
                 finish_reason="tool_call",
             )
 
@@ -346,11 +354,16 @@ class OpenAILLM(BaseLLM):
 
         choice = response.choices[0]
         response_message = choice.message
+        finish_reason = self._convert_finish_reason(choice.finish_reason)
         tool_calls = [
             ToolCall(
                 id=tool_call.id,
                 name=tool_call.function.name,
-                arguments=self._parse_arguments(tool_call.function.arguments),
+                arguments=self._parse_arguments(
+                    tool_call.function.arguments,
+                    tool_name=tool_call.function.name,
+                    finish_reason=finish_reason,
+                ),
             )
             for tool_call in (response_message.tool_calls or [])
         ]
@@ -368,7 +381,7 @@ class OpenAILLM(BaseLLM):
             message=message,
             reasoning=self._reasoning_text(response_message) or None,
             usage=self._convert_usage(response.usage),
-            finish_reason=self._convert_finish_reason(choice.finish_reason),
+            finish_reason=finish_reason,
         )
 
     @staticmethod
@@ -393,23 +406,47 @@ class OpenAILLM(BaseLLM):
     def _complete_tool_calls(
         cls,
         tool_calls: dict[int, dict[str, str]],
+        *,
+        finish_reason: FinishReason | None,
     ) -> list[ToolCall]:
         return [
             ToolCall(
                 id=state["id"],
                 name=state["name"],
-                arguments=cls._parse_arguments(state["arguments"]),
+                arguments=cls._parse_arguments(
+                    state["arguments"],
+                    tool_name=state["name"],
+                    finish_reason=finish_reason,
+                ),
             )
             for _, state in sorted(tool_calls.items())
         ]
 
     @staticmethod
-    def _parse_arguments(arguments: str) -> dict[str, Any]:
+    def _parse_arguments(
+        arguments: str,
+        *,
+        tool_name: str,
+        finish_reason: FinishReason | None,
+    ) -> dict[str, Any]:
         if not arguments:
             return {}
-        parsed = json.loads(arguments)
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError as error:
+            raise InvalidToolCallArgumentsError(
+                tool_name=tool_name,
+                raw_arguments=arguments,
+                finish_reason=finish_reason,
+                detail=str(error),
+            ) from error
         if not isinstance(parsed, dict):
-            raise ValueError("Tool call arguments must be a JSON object")
+            raise InvalidToolCallArgumentsError(
+                tool_name=tool_name,
+                raw_arguments=arguments,
+                finish_reason=finish_reason,
+                detail="arguments must decode to a JSON object",
+            )
         return parsed
 
     @staticmethod

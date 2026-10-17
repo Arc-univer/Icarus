@@ -2,6 +2,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from agent_app.model_provider.impl.anthropic_llm import AnthropicLLM
 from icarus.core.models.messages import (
     ImagePart,
@@ -266,6 +268,43 @@ def test_ainvoke和astream_使用异步客户端():
     assert response_result.message.tool_calls[0].name == "get_weather"
     assert stream_result[0].tool_calls[0].arguments == {"city": "Beijing"}
     assert stream_result[-1].finish_reason == "tool_call"
+
+
+def test_stream_非法工具参数抛出类型化错误():
+    from icarus.core.llm import InvalidToolCallArgumentsError
+
+    llm = make_anthropic_llm()
+    llm._client.messages.create.return_value = iter(
+        [
+            SimpleNamespace(
+                type="content_block_start",
+                index=0,
+                content_block=SimpleNamespace(
+                    type="tool_use",
+                    id="tool_1",
+                    name="get_weather",
+                    input={},
+                ),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                index=0,
+                delta=SimpleNamespace(
+                    type="input_json_delta",
+                    partial_json='{"city": "Beijing" "unit": "c"}',
+                ),
+            ),
+            SimpleNamespace(type="content_block_stop", index=0),
+        ]
+    )
+
+    with pytest.raises(InvalidToolCallArgumentsError) as captured:
+        list(llm.stream([Message("user", [TextPart("天气")])]))
+
+    error = captured.value
+    assert error.tool_name == "get_weather"
+    assert error.finish_reason is None
+    assert error.raw_arguments == '{"city": "Beijing" "unit": "c"}'
 
 
 def test_close和aclose_关闭对应客户端():

@@ -6,7 +6,7 @@ from typing import Any, Callable, cast
 
 from anthropic import Anthropic, AsyncAnthropic
 
-from icarus.core.llm import BaseLLM
+from icarus.core.llm import BaseLLM, InvalidToolCallArgumentsError
 from icarus.core.models.messages import (
     FinishReason,
     ImageAssetUnavailableError,
@@ -112,7 +112,11 @@ class AnthropicLLM(BaseLLM):
                 state = tool_calls.pop(event.index, None)
                 if state is not None:
                     yield LLMStreamChunk(
-                        tool_calls=[self._complete_tool_call(state)],
+                        tool_calls=[
+                            self._complete_tool_call(
+                                state, finish_reason=None
+                            )
+                        ],
                     )
                 continue
 
@@ -176,7 +180,11 @@ class AnthropicLLM(BaseLLM):
                 state = tool_calls.pop(event.index, None)
                 if state is not None:
                     yield LLMStreamChunk(
-                        tool_calls=[self._complete_tool_call(state)],
+                        tool_calls=[
+                            self._complete_tool_call(
+                                state, finish_reason=None
+                            )
+                        ],
                     )
                 continue
 
@@ -360,6 +368,17 @@ class AnthropicLLM(BaseLLM):
             elif block.type == "thinking":
                 reasoning.append(block.thinking)
             elif block.type == "tool_use":
+                if not isinstance(block.input, dict):
+                    raise InvalidToolCallArgumentsError(
+                        tool_name=block.name,
+                        raw_arguments=json.dumps(
+                            block.input, ensure_ascii=False, default=str
+                        ),
+                        finish_reason=self._convert_finish_reason(
+                            response.stop_reason
+                        ),
+                        detail="arguments must decode to a JSON object",
+                    )
                 tool_calls.append(
                     ToolCall(
                         id=block.id,
@@ -383,20 +402,47 @@ class AnthropicLLM(BaseLLM):
         )
 
     @classmethod
-    def _complete_tool_call(cls, state: dict[str, str]) -> ToolCall:
+    def _complete_tool_call(
+        cls,
+        state: dict[str, str],
+        *,
+        finish_reason: FinishReason | None,
+    ) -> ToolCall:
         return ToolCall(
             id=state["id"],
             name=state["name"],
-            arguments=cls._parse_arguments(state["arguments"]),
+            arguments=cls._parse_arguments(
+                state["arguments"],
+                tool_name=state["name"],
+                finish_reason=finish_reason,
+            ),
         )
 
     @staticmethod
-    def _parse_arguments(arguments: str) -> dict[str, Any]:
+    def _parse_arguments(
+        arguments: str,
+        *,
+        tool_name: str,
+        finish_reason: FinishReason | None,
+    ) -> dict[str, Any]:
         if not arguments:
             return {}
-        parsed = json.loads(arguments)
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError as error:
+            raise InvalidToolCallArgumentsError(
+                tool_name=tool_name,
+                raw_arguments=arguments,
+                finish_reason=finish_reason,
+                detail=str(error),
+            ) from error
         if not isinstance(parsed, dict):
-            raise ValueError("Tool call arguments must be a JSON object")
+            raise InvalidToolCallArgumentsError(
+                tool_name=tool_name,
+                raw_arguments=arguments,
+                finish_reason=finish_reason,
+                detail="arguments must decode to a JSON object",
+            )
         return parsed
 
     @staticmethod

@@ -23,7 +23,7 @@ from icarus.core.tools import (
     ToolExecutor,
     ToolRegistry,
 )
-from icarus.core.llm import BaseLLM
+from icarus.core.llm import BaseLLM, InvalidToolCallArgumentsError
 from icarus.core.models.messages import (
     LLMStreamChunk,
     Message,
@@ -47,11 +47,17 @@ class StreamQueueLLM(BaseLLM):
 
     def stream(self, messages, tools=None):
         self.calls.append((list(messages), list(tools or [])))
-        yield from self.streams.pop(0)
+        stream = self.streams.pop(0)
+        if isinstance(stream, Exception):
+            raise stream
+        yield from stream
 
     async def astream(self, messages, tools=None):
         self.calls.append((list(messages), list(tools or [])))
-        for chunk in self.streams.pop(0):
+        stream = self.streams.pop(0)
+        if isinstance(stream, Exception):
+            raise stream
+        for chunk in stream:
             await asyncio.sleep(0)
             yield chunk
 
@@ -576,3 +582,68 @@ def test_stream和astream都在超出step上限前截停(async_mode):
     assert len(llm.calls) == 1
     assert channel.current_step == 1
     assert channel.history_checkpoint_usage == Usage(10, 4)
+
+
+def invalid_arguments_error():
+    return InvalidToolCallArgumentsError(
+        tool_name="echo",
+        raw_arguments='{"value": "hello"',
+        finish_reason="tool_call",
+        detail="Expecting ',' delimiter",
+    )
+
+
+def test_stream_在非法工具参数后重试同一step():
+    agent, llm = make_agent([invalid_arguments_error(), final_stream()])
+
+    events = list(
+        agent.stream("你是助手", [], "执行任务", tools=["echo"])
+    )
+
+    final = events[-1]
+    assert isinstance(final, AgentCompletedEvent)
+    assert final.response.message.content == [TextPart("最终回答")]
+    assert final.response.steps == 1
+    assert len(llm.calls) == 2
+    assert llm.calls[0][0] == llm.calls[1][0]
+
+
+def test_astream_在非法工具参数后重试同一step():
+    agent, llm = make_agent([invalid_arguments_error(), final_stream()])
+
+    async def run():
+        return [
+            event
+            async for event in agent.astream(
+                "你是助手", [], "执行任务", tools=["echo"]
+            )
+        ]
+
+    events = asyncio.run(run())
+
+    final = events[-1]
+    assert isinstance(final, AgentCompletedEvent)
+    assert final.response.message.content == [TextPart("最终回答")]
+    assert final.response.steps == 1
+    assert len(llm.calls) == 2
+
+
+def test_stream_非法工具参数超过重试上限后失败且不增加step():
+    channel = active_channel()
+    agent, llm = make_agent(
+        [invalid_arguments_error() for _ in range(3)]
+    )
+
+    with pytest.raises(InvalidToolCallArgumentsError):
+        list(
+            agent.stream(
+                "你是助手",
+                [],
+                "执行任务",
+                tools=["echo"],
+                run_control=channel,
+            )
+        )
+
+    assert len(llm.calls) == 3
+    assert channel.current_step == 1

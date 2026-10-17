@@ -25,7 +25,7 @@ from icarus.core.tools.result_budget import (
 )
 from icarus.core.tools.types import ToolExecutionResult
 from icarus.core.model_types import LLMRole
-from icarus.core.llm import BaseLLM
+from icarus.core.llm import BaseLLM, InvalidToolCallArgumentsError
 from icarus.core.models.messages import (
     ContentPart,
     ImagePart,
@@ -37,6 +37,9 @@ from icarus.core.models.messages import (
     ToolDefinition,
     Usage,
 )
+
+
+INVALID_TOOL_ARGUMENT_RETRIES = 2
 
 
 @dataclass
@@ -88,9 +91,7 @@ class ReActAgent(BaseAgent):
 
         while True:
             self._begin_step(state, run_control)
-            response = self._llm.invoke(
-                state.messages, state.tool_definitions or None
-            )
+            response = self._invoke_response(state)
             self._accept_response(state, response)
 
             if not response.message.tool_calls:
@@ -126,10 +127,7 @@ class ReActAgent(BaseAgent):
 
         while True:
             self._begin_step(state, run_control)
-            response = await self._llm.ainvoke(
-                state.messages,
-                state.tool_definitions or None,
-            )
+            response = await self._ainvoke_response(state)
             self._accept_response(state, response)
 
             if not response.message.tool_calls:
@@ -166,21 +164,28 @@ class ReActAgent(BaseAgent):
         while True:
             self._begin_step(state, run_control)
             chunks: list[LLMStreamChunk] = []
-            for chunk in self._llm.stream(
-                state.messages,
-                state.tool_definitions or None,
-            ):
-                if chunk.reasoning_delta:
-                    yield AgentThinkingDeltaEvent(
-                        step=state.steps,
-                        text=chunk.reasoning_delta,
-                    )
-                if chunk.text_delta:
-                    yield AgentTextDeltaEvent(
-                        step=state.steps,
-                        text=chunk.text_delta,
-                    )
-                chunks.append(chunk)
+            for attempt in range(INVALID_TOOL_ARGUMENT_RETRIES + 1):
+                chunks = []
+                try:
+                    for chunk in self._llm.stream(
+                        state.messages,
+                        state.tool_definitions or None,
+                    ):
+                        if chunk.reasoning_delta:
+                            yield AgentThinkingDeltaEvent(
+                                step=state.steps,
+                                text=chunk.reasoning_delta,
+                            )
+                        if chunk.text_delta:
+                            yield AgentTextDeltaEvent(
+                                step=state.steps,
+                                text=chunk.text_delta,
+                            )
+                        chunks.append(chunk)
+                    break
+                except InvalidToolCallArgumentsError:
+                    if attempt == INVALID_TOOL_ARGUMENT_RETRIES:
+                        raise
 
             response = self._aggregate_stream_chunks(chunks)
             self._accept_response(state, response)
@@ -270,21 +275,28 @@ class ReActAgent(BaseAgent):
         while True:
             self._begin_step(state, run_control)
             chunks: list[LLMStreamChunk] = []
-            async for chunk in self._llm.astream(
-                state.messages,
-                state.tool_definitions or None,
-            ):
-                if chunk.reasoning_delta:
-                    yield AgentThinkingDeltaEvent(
-                        step=state.steps,
-                        text=chunk.reasoning_delta,
-                    )
-                if chunk.text_delta:
-                    yield AgentTextDeltaEvent(
-                        step=state.steps,
-                        text=chunk.text_delta,
-                    )
-                chunks.append(chunk)
+            for attempt in range(INVALID_TOOL_ARGUMENT_RETRIES + 1):
+                chunks = []
+                try:
+                    async for chunk in self._llm.astream(
+                        state.messages,
+                        state.tool_definitions or None,
+                    ):
+                        if chunk.reasoning_delta:
+                            yield AgentThinkingDeltaEvent(
+                                step=state.steps,
+                                text=chunk.reasoning_delta,
+                            )
+                        if chunk.text_delta:
+                            yield AgentTextDeltaEvent(
+                                step=state.steps,
+                                text=chunk.text_delta,
+                            )
+                        chunks.append(chunk)
+                    break
+                except InvalidToolCallArgumentsError:
+                    if attempt == INVALID_TOOL_ARGUMENT_RETRIES:
+                        raise
 
             response = self._aggregate_stream_chunks(chunks)
             self._accept_response(state, response)
@@ -467,6 +479,28 @@ class ReActAgent(BaseAgent):
             tool_executor=tool_executor,
             tool_definitions=tool_executor.definitions(),
         )
+
+    def _invoke_response(self, state: _RunState) -> LLMResponse:
+        for attempt in range(INVALID_TOOL_ARGUMENT_RETRIES + 1):
+            try:
+                return self._llm.invoke(
+                    state.messages, state.tool_definitions or None
+                )
+            except InvalidToolCallArgumentsError:
+                if attempt == INVALID_TOOL_ARGUMENT_RETRIES:
+                    raise
+        raise AssertionError("unreachable")
+
+    async def _ainvoke_response(self, state: _RunState) -> LLMResponse:
+        for attempt in range(INVALID_TOOL_ARGUMENT_RETRIES + 1):
+            try:
+                return await self._llm.ainvoke(
+                    state.messages, state.tool_definitions or None
+                )
+            except InvalidToolCallArgumentsError:
+                if attempt == INVALID_TOOL_ARGUMENT_RETRIES:
+                    raise
+        raise AssertionError("unreachable")
 
     @classmethod
     def _begin_step(

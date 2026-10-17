@@ -15,7 +15,7 @@ from icarus.core.tools import (
     ToolExecutor,
     ToolRegistry,
 )
-from icarus.core.llm import BaseLLM
+from icarus.core.llm import BaseLLM, InvalidToolCallArgumentsError
 from icarus.core.models.messages import (
     ImagePart,
     LLMResponse,
@@ -34,7 +34,10 @@ class QueueLLM(BaseLLM):
 
     def invoke(self, messages, tools=None):
         self.calls.append((list(messages), list(tools or [])))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     async def ainvoke(self, messages, tools=None):
         return self.invoke(messages, tools)
@@ -620,3 +623,66 @@ def test_react_agent在每个tool_batch前检查取消(async_mode):
             )
 
     assert tool.calls == ["first"]
+
+
+def invalid_arguments_error():
+    return InvalidToolCallArgumentsError(
+        tool_name="echo",
+        raw_arguments='{"value": "hello"',
+        finish_reason="tool_call",
+        detail="Expecting ',' delimiter",
+    )
+
+
+def test_invoke_在非法工具参数后重试同一step():
+    agent, llm = make_agent([invalid_arguments_error(), final_response()])
+
+    result = agent.invoke(
+        system_prompt="你是助手",
+        history_messages=[],
+        input_prompt="执行任务",
+        tools=["echo"],
+    )
+
+    assert result.message.content == [TextPart("done")]
+    assert result.steps == 1
+    assert len(llm.calls) == 2
+    assert llm.calls[0][0] == llm.calls[1][0]
+
+
+def test_ainvoke_在非法工具参数后重试同一step():
+    agent, llm = make_agent([invalid_arguments_error(), final_response()])
+
+    result = asyncio.run(
+        agent.ainvoke(
+            system_prompt="你是助手",
+            history_messages=[],
+            input_prompt="执行任务",
+            tools=["echo"],
+        )
+    )
+
+    assert result.message.content == [TextPart("done")]
+    assert result.steps == 1
+    assert len(llm.calls) == 2
+
+
+def test_invoke_非法工具参数超过重试上限后失败且不增加step():
+    channel = TaskChannel("task-1")
+    channel.mark_preparing_context()
+    channel.start_run("run-1")
+    agent, llm = make_agent(
+        [invalid_arguments_error() for _ in range(3)]
+    )
+
+    with pytest.raises(InvalidToolCallArgumentsError):
+        agent.invoke(
+            system_prompt="你是助手",
+            history_messages=[],
+            input_prompt="执行任务",
+            tools=["echo"],
+            run_control=channel,
+        )
+
+    assert len(llm.calls) == 3
+    assert channel.current_step == 1
