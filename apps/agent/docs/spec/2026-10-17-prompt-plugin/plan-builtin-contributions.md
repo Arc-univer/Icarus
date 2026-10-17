@@ -4,14 +4,16 @@
 
 **Goal:** 将业务指导归还现有插件，经Prompt注入，并精简基础System Prompt。
 **当前状态（2026-10-17）：** 实施、回归与独立增量审查完成；结果见[plan-builtin-validation.md](plan-builtin-validation.md)。
-**Architecture:** 不改Prompt契约。memory/skill/process/knowledge/mcp/builtin-tools各消费UserInput，发布一次PromptContributionEvent；业务数据路径保持原状。基础system只保留身份、授权、证据、工具和沟通约束。
+> **后续修订（2026-10-17）：** 本文记录最初“每任务动态贡献”的增量计划。随后确认稳定业务指导不应每任务重复，已迁到 `session` 静态层并进入 System；当前实现与验证以 [arch.md](arch.md)、[plan-builtin-validation.md](plan-builtin-validation.md) 为准。
+
+**Architecture:** memory/skill/process/knowledge/mcp/builtin-tools的稳定指导通过 `static_prompt_sections()` 进入 `session` 静态层；真正随任务变化的内容才使用 `PromptContributionEvent`。业务数据路径保持原状。基础system只保留身份、授权、证据、工具和沟通约束。
 **Tech Stack:** 现有Python/dataclass/asyncio/pytest与manifest contracts。
 **Spec:** [功能设计](plan.md)、[当前实现](arch.md)；本轮用户授权“能加入的尝试加入，提高能力，system精简”。
 
 ## Global Constraints
 
 - 不用静态persona槽塞工具/业务指导，不改ReAct/core，不增加抽象/mixin/配置开关/数据库字段。
-- 指导文本位于各插件自己的prompts.py，独立迁移；所有动态层为contributor。
+- 稳定业务指导使用 `session` 静态层，不放进 persona，也不每任务动态注入；真正任务级内容才用动态层。
 - Memory指导先于自动召回发送，不改变召回正文/Region/ACK，也不重复注入召回结果。
 - Skill只给轻量目录（最多8项，单项超过256字符整项省略，总JSON<=1200字符，正文不预加载）；元数据明确为非可信数据。
 - MCP无配置server发空completed；knowledge不自动RAG；process不自动回灌状态流；不迁移Job通知。

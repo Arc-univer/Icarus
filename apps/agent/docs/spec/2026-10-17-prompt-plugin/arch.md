@@ -12,7 +12,7 @@
 - sources.py：仅根目录 AGENTS.md→CLAUDE.md 回退，有界 UTF-8 读取，拒绝越界路径、非普通文件。
 - composer.py：稳定排序和渲染，复用 conservative_token_count，optional整节丢弃，required/base/external不可丢、不截断。
 - plugin.py/state.py：内存静态快照、任务贡献聚合与受管deadline，查询/更新handler。
-- factory.py/config.py：设施与用户配置分离；总预算8192、单节4096、timeout5秒、required_contributors列表。
+- factory.py/config.py：设施与用户配置分离；总预算12288、单节8192、timeout5秒、required_contributors列表。
 
 ## 装配与运行
 
@@ -20,8 +20,9 @@
 从有效 PromptContributor 采样静态 sections；从 manifest 发现 input.user_input→prompt.contribution 的生产者，
 以及 prompt.update 生产者；传入复制后的静态数据和允许来源，不把 sibling 对象交给 Prompt。
 
-静态按 base/workspace/persona/external 渲染；动态按 mode/contributor/runtime，同层来源+section_id排序。
-Prompt 消费 UserInput，与已配置来源的终态贡献汇合；无来源或全部完成立即发一次 ContextContributionEvent。
+静态按 base/workspace/session/persona/external 渲染；动态按 mode/contributor/runtime，同层来源+section_id排序。
+六段稳定业务指导属于 session 静态层，只在初始化/恢复时进入 System，不进入每任务 User Prompt。
+Prompt 消费 UserInput 是为真正动态来源保留的路径；没有动态来源时仍会发一次空 completed，保证 Blackboard readiness 推进。
 缺失来源在input时间+timeout后完成；接收时记录绝对cutoff，入队与提前缓存贡献都检查接收时间/事件时间，不能靠零延时timer竞态延长截止。optional跳过，required使task失败。贡献先到可缓存；重复/迟到准备结果不转成run-time更新。
 等待放在runtime托管后台任务，prompt.read不被普通Event等待阻塞。
 
@@ -46,10 +47,11 @@ lazy create、unload/reload、进程重启均使用同一私有持久化记录�
 
 ## 其他插件接入
 
-静态：实现 `static_prompt_sections() -> tuple[PromptSection,...]`，只贡献persona层；应用在初始化结束后自动采样。
-动态：manifest声明消费input.user_input、发布prompt.contribution，handler返回或publish
+静态：实现 `static_prompt_sections() -> tuple[PromptSection,...]`；当前允许 `session` 与 `persona` 层。`session` 用于稳定的业务/工具使用指导，`persona` 用于身份与表达；应用在初始化结束后自动采样，只构建一次并放入 System Prompt。
+
+动态：只用于真正随任务变化的内容。manifest声明消费input.user_input、发布prompt.contribution，handler返回或publish
 PromptContributionEvent(task_id=event.task_id,status="completed",sections=(...))，失败也发终态。
-若需持续更新，另外声明发布prompt.update；无task为待生效静态，有task为当前动态提醒。
+若需运行中更新，另外声明发布prompt.update；无task为待生效persona静态，有task为当前动态提醒。
 生产者不直接调用PromptPlugin、不import其实现；只依赖应用契约。required来源由Prompt接收方配置。
 
 真实外部插件接入示例位于 `apps/gateway/test/test_prompt_e2e.py` 的 write_contributor：包括manifest、
@@ -64,6 +66,9 @@ from icarus.core.plugin import BasePlugin, handles
 
 class ExamplePlugin(BasePlugin):
     def static_prompt_sections(self):
+        return (PromptSection("guidance", "session", "稳定的使用指导"),)
+
+    def static_persona_sections(self):
         return (PromptSection("persona", "persona", "人格描述"),)
 
     @handles(UserInputEvent)
@@ -75,32 +80,33 @@ class ExamplePlugin(BasePlugin):
         ),)
 ```
 
-其manifest沿用schema2，contracts填写agent_app.contracts.prompt，consumed_events包含input.user_input，
-published_events包含prompt.contribution；工厂返回PluginRegistration。若属于必须等待且失败即终止的来源，
-在prompt用户配置required_contributors中声明该插件ID，而不是让生产者自己决定required。
+稳定规则放 `session`，人格放 `persona`，真正随任务变化的内容才放 `mode/contributor/runtime`。
+其manifest沿用schema2；只有当插件发布 prompt Event 时才需要 `contracts: agent_app.contracts.prompt`、
+`consumed_events: ["input.user_input"]`、`published_events: ["prompt.contribution"]`。只做静态 session/persona 的插件
+不需要声明 prompt Event，应用通过 `PromptContributor` Protocol 直接采样。
 
 静态Protocol不是运行期查询接口，不能从另一个handler直接调用兄弟插件来拼提示词；动态来源必须发终态，
 即使无内容也发completed+空sections。超时默认optional省略，required失败。
 
 ## 已接入的内置贡献者
 
-六个业务插件都声明消费input.user_input、发布prompt.contribution，使用自己的prompts.py维护contributor层内容：
+六个业务插件通过 `static_prompt_sections()` 提供 `session` 层稳定指导，使用自己的prompts.py维护内容：
 
 | 插件 | 当前贡献 | 不改变的业务路径 |
 |---|---|---|
-| memory | 长期记忆使用/自然表达/维护边界；先发送指导再后台召回 | 召回正文仍走TaskContextInput+Region+ACK，不在Prompt再注入一份 |
+| memory | 长期记忆使用/自然表达/维护边界 | 召回正文仍走TaskContextInput+Region+ACK，不在Prompt再注入一份 |
 | skill | 发现/先读SKILL.md规则、当前写入开关说明、最多8项轻量目录 | 生成/演化内部Agent及Job通知不变；不自动执行Skill |
 | process | bash与后台任务分工、start不等于ready、跟进logs | 不自动启动/查询进程，不回灌状态事件 |
 | knowledge | 聚焦查询、读原文、真实引用、写入边界 | 不做自动RAG、不查询/上传后端 |
-| mcp | 先搜索/列目录、真实tool_ref/schema、配置不等于连接成功 | 无服务器时空completed；指导生成不联网/不启动bridge |
+| mcp | 先搜索/列目录、真实tool_ref/schema、配置不等于连接成功 | 无服务器时为空；指导生成不联网/不启动bridge |
 | builtin-tools | 文件先读、分页、覆盖/行前插入、命令退出码 | ToolDefinition和参数约束不变 |
 
 Skill目录单项JSON>256字符整项省略，总JSON<=1200字符，最多8项；元数据明确视为不可信数据，
-正文按需read。现有scanner改为只读取最多16KiB YAML frontmatter，不读取后续正文，避免每task全文件IO。
-这些来源默认optional，按Prompt接收方配置可设required；没有内容也发终态，避免准备无限等待。
+正文按需read。现有scanner只读取最多16KiB YAML frontmatter，不读取后续正文。该目录在session初始化/
+恢复时采样一次，不在每任务重扫；新session或运行时重启后自然更新。
 
-基础System Prompt从1110降为472字符/保守tokens（3208→1374 UTF-8 bytes，约减57.5%），
-减少的是**稳定基础段**，不承诺整次请求tokens同幅减少：启用的插件指导转入当前User Prompt并随历史持久化。
+基础System Prompt从1110降为472字符/保守tokens（3208→1374 UTF-8 bytes，约减57.5%）；六个session指导
+约1339 tokens。它们现在只以一份进入System，不再每任务进入User Prompt并累积到历史。
 
 ## 限制
 

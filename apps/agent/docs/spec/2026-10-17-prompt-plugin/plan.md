@@ -1,6 +1,6 @@
 # 提示词插件｜功能设计
 
-> 状态：**代码已实现，独立审查修复与最终验证完成**。现状见 [arch.md](arch.md)，实际测试记录见 [plan-validation.md](plan-validation.md)。
+> 状态：**已实现；session 静态迁移、真实 socket 与真实远端模型验证完成**。现状见 [arch.md](arch.md)，实际测试记录见 [plan-validation.md](plan-validation.md) 与 [plan-builtin-validation.md](plan-builtin-validation.md)。
 > 用户已确认功能范围；审查产生的必要技术修正见 [plan-review.md](plan-review.md)。
 > 文件级任务与验证见 [plan-implementation.md](plan-implementation.md)。目录沿用首次设计日期 2026-10-17。
 
@@ -27,8 +27,12 @@
 |---|---|---|
 | base | 内置 `DEFAULT_SYSTEM_PROMPT` | 是 |
 | workspace | 工作区根目录 `AGENTS.md`，不存在才用 `CLAUDE.md` | 否 |
+| session | 业务插件稳定使用指导（Memory/Skill/Process/Knowledge/MCP/Builtin-tools） | 由来源 required 配置决定 |
 | persona | 独立插件初始化时贡献 | 由来源 required 配置决定 |
 | external | `session.create.instructions` | 是，内容原样保留 |
+
+静态层顺序为 `base → workspace → session → persona → external`。`session` 与 `persona` 只允许在初始化/恢复后采样；
+真正随任务变化的内容才进入 `mode/contributor/runtime` 动态层。
 
 同层按 `(source_plugin_id, section_id)` 稳定排序；需要顺序时用 section_id 前缀。只增加必要的分隔标题，不 strip、规范化或截断正文。高层明确要求和安全边界不因后置文本而失效；工作区项目规范优先于默认做法，persona 调整身份/表达而不赋予额外权限。
 
@@ -70,7 +74,7 @@
 @dataclass(frozen=True)
 class PromptSection:
     section_id: str
-    layer: Literal["base", "workspace", "persona", "external", "mode", "contributor", "runtime"]
+    layer: Literal["base", "workspace", "session", "persona", "external", "mode", "contributor", "runtime"]
     content: str
 
 @runtime_checkable
@@ -78,7 +82,7 @@ class PromptContributor(Protocol):
     def static_prompt_sections(self) -> tuple[PromptSection, ...]: ...
 ```
 
-与初稿相比删除冗余 slot/source/required 字段：slot 由 layer 确定，来源取真实 publisher/装配 owner，required 取接收方配置，避免贡献者伪造身份和重要性。base/workspace/external 为内置来源保留；其他插件只允许贡献 persona/mode/contributor/runtime。
+与初稿相比删除冗余 slot/source/required 字段：slot 由 layer 确定，来源取真实 publisher/装配 owner，required 取接收方配置，避免贡献者伪造身份和重要性。base/workspace/external 为内置来源保留；其他插件可贡献 session/persona/mode/contributor/runtime。
 
 - section_id 为非空规范标识，正文必须是字符串；同一来源的 section_id 重复是无效贡献。
 - 空正文可跳过；一组空 sections 是合法的“无贡献/清除当前来源快照”。
@@ -167,7 +171,7 @@ CAPABILITIES = (PromptRead,)
 
 ## 5. 外部指令：不可变、私有、持久化
 
-API：`session.create(..., instructions: str | None = None)`。只在创建时接受；追加到 base/workspace/persona 后，不替换整段 base。`None` 不存记录，空字符串也可原样存储。submit/steer/get 等接口不接受这个字段。
+API：`session.create(..., instructions: str | None = None)`。只在创建时接受；追加到 base/workspace/session/persona 后，不替换整段 base。`None` 不存记录，空字符串也可原样存储。submit/steer/get 等接口不接受这个字段。
 
 ### 5.1 复用现有表，隔离公共序号
 
@@ -194,7 +198,7 @@ API：`session.create(..., instructions: str | None = None)`。只在创建时�
 
 ## 6. 预算与错误
 
-配置保持最少：`max_prompt_tokens=8192`（静态+当前动态总量）、`max_section_tokens=4096`、`contributor_timeout_seconds=5.0`、`required_contributors=[]`。总预算命名较初稿的 max_static_prompt_tokens 更准确，但保留用户确认的默认 8192；不新增各层独立数值配置。
+配置保持最少：`max_prompt_tokens=12288`（静态+当前动态总量）、`max_section_tokens=8192`、`contributor_timeout_seconds=5.0`、`required_contributors=[]`。总预算命名较初稿的 max_static_prompt_tokens 更准确；提高上限是为了容纳工作区 AGENTS.md 与 session 静态指导。
 
 - 复用现有 `conservative_token_count(text)=max(len(text), ceil(utf8_bytes/3))`，这是保守估算，**不是精确 tokenizer**。
 - Gateway 根据实际 max_section_tokens 做字符≤T、UTF-8 bytes≤3T 检查；Agent 应用入口独立复核，绕过 Gateway 也不能写入超限指令。两层共用纯函数/配置定义，不复制默认值。
