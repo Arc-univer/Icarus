@@ -18,7 +18,11 @@ from icarus.core.runtime_update import RuntimeUpdate
 class RuntimeStub:
     is_running = True
 
-    async def create_session(self, workspace_path, session_id=None, *, load_runtime=True):
+    def validate_session_instructions(self, instructions):
+        from agent_app.plugins.prompt.composer import validate_instructions
+        validate_instructions(instructions, max_tokens=4096)
+
+    async def create_session(self, workspace_path, session_id=None, *, load_runtime=True, instructions=None):
         self.created = (workspace_path, session_id)
         self.load_runtime = load_runtime
         return session_id or "generated"

@@ -8,10 +8,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, ValidationError
+from pydantic import Field, StrictStr, ValidationError
 
 from agent_app.application import (
     AgentRuntime,
+    PromptError,
     AgentRuntimeStoppingError,
     ConversationHistoryCorruptError,
     InvalidResourceError,
@@ -55,6 +56,7 @@ class SessionParams(WorkspaceParams):
 
 
 class CreateSessionParams(WorkspaceParams):
+    instructions: StrictStr | None = None
     load_runtime: bool = True
     session_id: str | None = Field(
         default=None, min_length=1, pattern=r"^[A-Za-z0-9._-]+$"
@@ -144,6 +146,8 @@ class GatewayMethods:
             return await handler(params)
         except GatewayRpcError:
             raise
+        except PromptError as error:
+            raise _business(error.code, str(error)) from None
         except SessionNotFoundError as error:
             raise _business("session_not_found", "Session is not found") from error
         except SessionAlreadyExistsError as error:
@@ -159,6 +163,11 @@ class GatewayMethods:
         except KeyError as error:
             raise _business("task_status_unavailable", "Task status is unavailable") from error
         except Exception as error:
+            cause = error.__cause__
+            while cause is not None:
+                if isinstance(cause, PromptError):
+                    raise _business(cause.code, str(cause)) from None
+                cause = cause.__cause__
             self.logger.exception("Gateway method failed: method=%s", method)
             raise GatewayRpcError(INTERNAL_ERROR, "Internal error") from error
 
@@ -175,8 +184,13 @@ class GatewayMethods:
 
     async def _session_create(self, params):
         value = self._validate(CreateSessionParams, params)
+        try:
+            self.runtime.validate_session_instructions(value.instructions)
+        except PromptError:
+            raise GatewayRpcError(INVALID_PARAMS, "Invalid session instructions") from None
         session_id = await self.runtime.create_session(
-            value.workspace_path, value.session_id, load_runtime=value.load_runtime
+            value.workspace_path, value.session_id, load_runtime=value.load_runtime,
+            instructions=value.instructions,
         )
         return SessionStatusModel.model_validate(
             await self.runtime.get_session_status(value.workspace_path, session_id)

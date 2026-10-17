@@ -53,9 +53,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def local_provider():
-    ProviderHandler.requests = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
+def local_provider(handler=ProviderHandler):
+    handler.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
