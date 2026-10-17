@@ -25,7 +25,9 @@ Agent 侧能力已经接入，使用时需要另行启动仓库内的自建 Mem0
 ```text
 apps/
 ├── agent/       Agent 执行、模型接入、工具、Plugin 和本地持久化
-│   ├── requirements.txt
+│   ├── pyproject.toml / requirements.txt
+│   ├── src/icarus/       可复用 core/runtime 框架
+│   ├── src/agent_app/    Icarus 插件、模型适配与应用服务
 │   └── scripts/
 ├── gateway/     本机 Agent 服务入口
 │   ├── requirements.txt
@@ -83,7 +85,12 @@ Trace 和日志继续保存在 Session 文件目录中。Gateway、TUI 和未来
 
 Plugin 通过 Manifest 声明 Capability、Tool、Event 和状态范围，并由运行时解析依赖关系和生命周期。
 配置与 Plugin 拓扑在单个 SessionRuntime 生命周期内保持稳定，新建或重新加载 Session 时读取最新
-配置。Skill 支持发现、搜索、生产和演化，并保持明确的本地权限与持久化边界。MemoryPlugin
+配置。`apps/agent` 通过本地 editable distribution 提供 `icarus` 与 `agent_app`；Agent/Gateway 各自安装
+同一个项目，不共用虚拟环境。模型角色使用带唯一 `name` 的 `model_settings` 数组，由 `model_roles` 选择。
+旧固定角色配置仍可加载，新的代码统一按名称查找。
+
+Plugin manifest v2 使用稳定事件 ID 和按契约命名的 Capability，`@handles` 声明消费入口，
+`build_tools()` 是工具导出的唯一入口。Skill 支持发现、搜索、生产和演化，并保持明确的本地权限与持久化边界。MemoryPlugin
 每轮先做有界自动召回，再启动主 Agent；主 Agent还可以显式读取、写入和维护记忆。KnowledgePlugin
 提供按需查询、列举、读取、上传与重编译，不开放删除能力。
 
@@ -98,10 +105,11 @@ Event 或 Plugin 拓扑。
 每个 Task 都有明确身份、队列位置、运行状态和唯一终态，并支持取消与提交去重。图片不会以 Base64
 或任意绝对路径穿过 RPC，而是先进入受控暂存目录，再由 Runtime 校验并导入对应 Session Asset。
 
-### 非侵入式可观测性
+### 值改写与独立记录
 
-Event 用于业务通信，Blackboard 表达当前上下文状态，Hook 只负责 Trace、日志和监督。观测包装器不
-改变 Agent、模型或 Tool 的主流程行为，Session 的日志和 Trace 也按完整 Session 身份隔离。
+Event 用于业务通信，Blackboard 持有模型工作历史和上下文状态。Hook 仅在登记的值传递点按优先级
+改写参数或结果，不能改变路由身份、工具调用身份和控制流。Trace、日志与路由计数由独立运行时记录器
+和插件后端承担，不依赖注册观测 Hook；记录仍按完整 Session 身份隔离。
 
 ## 快速开始
 

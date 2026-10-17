@@ -13,7 +13,17 @@ process for convenience.
 
 ## Development and validation
 
-Use each application's private environment. Mem0 and OpenKB run in Docker; their
+Use each application's private environment. Agent and Gateway keep separate `.venv` directories;
+both installers install the app-owned `apps/agent` editable distribution (`icarus` and `agent_app`).
+Do not use repository-root PYTHONPATH as a replacement for installing Agent. Gateway/TUI retain their
+own existing repository bootstrap for root-owned protocol/environment modules.
+
+`make typecheck-agent` checks both canonical Python packages; `make check-package-agent` builds a wheel,
+checks all 11 manifests and packaged defaults, and installs it into a disposable verification environment.
+Gateway's suite includes a real TCP/WebSocket test with production runtime/plugins/SQLite and deterministic
+local HTTP fixtures for external services; it is not a remote-model smoke.
+
+Mem0 and OpenKB run in Docker; their
 `.venv` directories are development/test environments, not additional production
 services. Install a service test environment with `icarus install mem0 --dev` or
 `icarus install openkb --dev`. This does not start a service or require model credentials.

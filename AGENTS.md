@@ -45,7 +45,7 @@ corresponding document. Explicit repository rules in this file still apply.
 - Model-vendor differences stay in `model_provider`; upper layers must not branch on OpenAI, Anthropic, or other provider protocols.
 - ReActAgent remains stateless and must not depend on Plugin Runtime, Blackboard, UI, TTS, or domain plugins.
 - Plugin Runtime is generic infrastructure. It routes by source Plugin identity and must not interpret concrete Event types or import domain plugins.
-- Event is the business communication mechanism. Hook is only for persistence, observability, and supervision; Hook must not replace EventBus or change main-flow behavior.
+- Event is the business communication mechanism. Hooks may rewrite values only at declared value-passing points, with explicit priority and validated input/output. Hooks must not trigger downstream plugins, change routing identities, or determine control-flow direction. Recording and logging belong to runtime infrastructure and plugin backends, not Hooks.
 - Blackboard is a Plugin, not the EventBus.
 - AgentPlugin publishes the raw execution stream. Styling, TTS, emotion, action, Skill, Memory, and similar processing belong to independent plugins.
 - Do not implement nested child plugins. Helpers inside a Plugin are ordinary component objects and do not register with PluginRegistry.
@@ -60,8 +60,10 @@ corresponding document. Explicit repository rules in this file still apply.
 Tests stay inside the corresponding application and mirror the source layer:
 
 ```text
-apps/agent/src/agent_orchestration/plugins/
-apps/agent/test/agent_orchestration/plugins/
+apps/agent/src/agent_app/plugins/
+apps/agent/test/agent_app/plugins/
+apps/agent/src/icarus/
+apps/agent/test/icarus/
 
 apps/tui/
 apps/tui/test/

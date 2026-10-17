@@ -30,7 +30,9 @@ Agent 侧完整 Tool Result。`session.steer` 可透传稳定 `submission_id`，
 ```
 
 依赖安装在 `apps/gateway/.venv`。Gateway 自己的直接依赖声明在 `requirements.txt`；安装脚本还会
-组合安装 `apps/agent/requirements.txt`，因为 Gateway 进程内加载 AgentRuntime。
+组合安装 `apps/agent/requirements.txt`，并 editable 安装本地 `apps/agent` distribution；两者不共用 venv。
+Gateway 从 `agent_app.application` 导入 AgentRuntime；仓库根 bootstrap 只用于 Gateway 与共享 wire 包，
+不是 Agent 新包的安装机制。
 
 ## 启动
 
