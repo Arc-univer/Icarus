@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import Field, ValidationError
 
-from apps.agent.src.application import (
+from agent_app.application import (
     AgentRuntime,
     AgentRuntimeStoppingError,
     ConversationHistoryCorruptError,
@@ -21,6 +21,7 @@ from apps.agent.src.application import (
     SessionNotFoundError,
     SubmissionConflictError,
 )
+from apps.gateway.src.protocol.responses import SessionStatusModel, TaskStatusModel, UnloadResultModel
 from apps.gateway.src.protocol.errors import (
     BUSINESS_ERROR,
     INTERNAL_ERROR,
@@ -36,6 +37,7 @@ from apps.gateway.src.protocol.models import (
 from packages.gateway_protocol import (
     DiscardEmptySessionResultModel,
     SessionListModel,
+    SessionHistoryModel,
     SessionSummaryModel,
 )
 
@@ -176,9 +178,9 @@ class GatewayMethods:
         session_id = await self.runtime.create_session(
             value.workspace_path, value.session_id, load_runtime=value.load_runtime
         )
-        return _wire(
+        return SessionStatusModel.model_validate(
             await self.runtime.get_session_status(value.workspace_path, session_id)
-        )
+        ).model_dump(mode="json")
 
     async def _session_list(self, params):
         value = self._validate(WorkspaceParams, params)
@@ -209,11 +211,9 @@ class GatewayMethods:
 
     async def _session_get(self, params):
         value = self._validate(SessionParams, params)
-        return _wire(
-            await self.runtime.get_session_status(
-                value.workspace_path, value.session_id
-            )
-        )
+        return SessionStatusModel.model_validate(
+            await self.runtime.get_session_status(value.workspace_path, value.session_id)
+        ).model_dump(mode="json")
 
     async def _session_delete(self, params):
         value = self._validate(SessionParams, params)
@@ -280,40 +280,28 @@ class GatewayMethods:
 
     async def _session_unload(self, params):
         value = self._validate(SessionParams, params)
-        return _wire(
-            await self.runtime.unload_session(
-                value.workspace_path, value.session_id
-            )
-        )
+        return UnloadResultModel.model_validate(
+            await self.runtime.unload_session(value.workspace_path, value.session_id)
+        ).model_dump(mode="json")
 
     async def _task_get(self, params):
         value = self._validate(TaskParams, params)
-        return _wire(
-            self.runtime.get_task_status(
-                value.workspace_path, value.session_id, value.task_id
-            )
-        )
+        return TaskStatusModel.model_validate(
+            self.runtime.get_task_status(value.workspace_path, value.session_id, value.task_id)
+        ).model_dump(mode="json")
 
     async def _session_history(self, params):
         value = self._validate(HistoryParams, params)
-        records, cursor = await self.runtime.get_session_history(
-            value.workspace_path,
-            value.session_id,
-            after_sequence=value.after_sequence,
+        page = await self.runtime.get_session_history_page(
+            value.workspace_path, value.session_id,
+            after_sequence=value.after_sequence, limit=value.limit,
         )
-        page = records[: value.limit]
-        next_after_sequence = (
-            page[-1].sequence if page else value.after_sequence
-        )
-        return {
-            "records": [
-                RuntimeUpdateModel.from_domain(item).model_dump(mode="json")
-                for item in page
-            ],
-            "history_cursor": cursor,
-            "next_after_sequence": next_after_sequence,
-            "has_more": len(records) > len(page),
-        }
+        return SessionHistoryModel(
+            records=tuple(RuntimeUpdateModel.from_domain(item) for item in page.records),
+            history_cursor=page.history_cursor,
+            next_after_sequence=page.next_after_sequence,
+            has_more=page.has_more,
+        ).model_dump(mode="json")
 
     @staticmethod
     def _validate(model, params):

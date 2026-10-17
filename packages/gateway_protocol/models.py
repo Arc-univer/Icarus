@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
-    from apps.agent.src.runtime_update import RuntimeUpdate
-    from apps.agent.src.application.runtime_status import (
+    from icarus.core.runtime_update import RuntimeUpdate
+    from agent_app.application.models.status import (
         DiscardSessionResult,
         SessionSummary,
     )

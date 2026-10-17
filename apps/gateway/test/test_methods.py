@@ -3,16 +3,16 @@ from datetime import UTC, datetime
 
 import pytest
 
-from apps.agent.src.agent_orchestration.plugins.user_input import InputAccepted
-from apps.agent.src.agent_orchestration.run_control import TaskOperationResult
-from apps.agent.src.application import (
+from icarus.core.contracts.input import InputAccepted
+from icarus.core.run_control import TaskOperationResult
+from agent_app.application import (
     DiscardSessionResult,
     SessionSummary,
     UnloadResult,
 )
 from apps.gateway.src.protocol.errors import BUSINESS_ERROR, GatewayRpcError
 from apps.gateway.src.protocol.methods import GatewayMethods
-from apps.agent.src.runtime_update import RuntimeUpdate
+from icarus.core.runtime_update import RuntimeUpdate
 
 
 class RuntimeStub:
@@ -120,6 +120,12 @@ class RuntimeStub:
             else (),
             3,
         )
+
+    async def get_session_history_page(self, workspace_path, session_id, *, after_sequence=0, limit=200):
+        from agent_app.application.models.history import HistoryPage
+        records, cursor = await self.get_session_history(workspace_path, session_id, after_sequence=after_sequence)
+        page = records[:limit]
+        return HistoryPage(page, cursor, page[-1].sequence if page else after_sequence, len(records) > len(page))
 
     async def cancel_task(self, *args):
         raise AssertionError(args)
