@@ -3,6 +3,7 @@
   "plugin_id": "knowledge",
   "plugin_version": "1.0.0",
   "entrypoint": "agent_app.plugins.knowledge.factory:create_plugin",
+  "contracts": "agent_app.contracts.prompt",
   "python_requires": [
     "httpx>=0.27,<1"
   ],
@@ -15,8 +16,8 @@
     "knowledge_upload",
     "knowledge_recompile"
   ],
-  "published_events": [],
-  "consumed_events": [],
+  "published_events": ["prompt.contribution"],
+  "consumed_events": ["input.user_input"],
   "state_scopes": [],
   "tier": "core",
   "required_config": [

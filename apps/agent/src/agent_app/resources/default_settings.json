@@ -25,6 +25,7 @@
     },
     "required_plugin_ids": [
       "persistence",
+      "prompt",
       "builtin-tools",
       "agent",
       "user-input",

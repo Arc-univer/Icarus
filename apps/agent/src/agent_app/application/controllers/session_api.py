@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from icarus.runtime.fanout import DEFAULT_QUEUE_CAPACITY
 
+from agent_app.contracts.prompt import PromptError
+from agent_app.plugins.prompt.composer import validate_instructions
+from agent_app.plugins.prompt.config import PluginConfig as PromptConfig
 from agent_app.application.errors import SubmissionConflictError, AgentRuntimeStoppingError
 
 import asyncio
@@ -108,7 +111,7 @@ class SessionApi:
         self._started = False
         self._stopping = False
         self._closed = False
-        self.sessions = SessionRegistry(clock=self._clock, config_loader=self._config_loader, entries=self._entries, entries_lock=self._entries_lock, handle_update=self._handle_update, publish_lifecycle=self._publish_lifecycle, session_factory=lambda *args, **kwargs: self._session_factory(*args, **kwargs), logger=self.logger)
+        self.sessions = SessionRegistry(clock=self._clock, config_loader=self._config_loader, entries=self._entries, entries_lock=self._entries_lock, handle_update=self._handle_update, publish_lifecycle=self._publish_lifecycle, load_instructions=lambda identity: self._store().get_session_instructions(identity), session_factory=lambda *args, **kwargs: self._session_factory(*args, **kwargs), logger=self.logger)
         self.submissions = SubmissionGuard(submission_history_limit=self.submission_history_limit, task_history_limit=self.task_history_limit)
         self.resources = ResourceImporter(path_resolver_getter=lambda: self._path_resolver)
         self.updates = UpdatePipeline(begin_unload_locked=self._begin_unload_locked, clock=self._clock, entries=self._entries, has_nonterminal_tasks=self._has_nonterminal_tasks, lifecycle_update=self._lifecycle_update, remember_task=self._remember_task, store=self._store, update_queue=self._update_queue, updates=self._updates, logger=self.logger)
@@ -169,14 +172,20 @@ class SessionApi:
                           run_id=f"workspace:{identity.workspace_key}")
         return result
 
+    def validate_session_instructions(self, instructions: str | None) -> None:
+        config = PromptConfig.model_validate(self._config_loader().runtime.plugin_config.get("prompt", {}))
+        validate_instructions(instructions, max_tokens=config.max_section_tokens)
+
     async def create_session(
         self,
         workspace_path: str | Path,
         session_id: str | None = None,
         *,
         load_runtime: bool = True,
+        instructions: str | None = None,
     ) -> str:
         self._require_accepting()
+        self.validate_session_instructions(instructions)
         identity = SessionIdentity.create(workspace_path, session_id or uuid4().hex)
         if self._entries.get(_key(identity)) is None and await self._store().session_exists(
             identity, include_deleted=True
@@ -193,7 +202,7 @@ class SessionApi:
                 "loading", "ready", "running", "unloading"
             }:
                 raise SessionAlreadyExistsError(identity.session_id)
-            await self._store().create_session(identity)
+            await self._store().create_session(identity, instructions=instructions)
             if not load_runtime:
                 return identity.session_id
             task = self._begin_load_locked(entry)

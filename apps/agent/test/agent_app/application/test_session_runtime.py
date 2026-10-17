@@ -49,22 +49,36 @@ def make_config(data_dir) -> ConfigModel:
     )
 
 
-def test_default_system_prompt将记忆作为自身能力并允许自主维护():
-    assert "你自己的长期记忆" in DEFAULT_SYSTEM_PROMPT
-    assert "无需每次征求用户确认" in DEFAULT_SYSTEM_PROMPT
-    assert "明确纠正" in DEFAULT_SYSTEM_PROMPT
-    assert "以用户当前的明确说法为准" in DEFAULT_SYSTEM_PROMPT
-    assert "不要记录密码、Token、Cookie、私钥" in DEFAULT_SYSTEM_PROMPT
-    assert "删除或遗忘前先确认目标和范围" in DEFAULT_SYSTEM_PROMPT
+def test_prompt_plugin_is_initialized_with_private_instructions_and_frozen_workspace(tmp_path):
+    async def run():
+        (tmp_path / "AGENTS.md").write_text("WORKSPACE-OLD")
+        runtime = SessionRuntime(SessionIdentity.create(tmp_path, "prompt-test"),
+            config=make_config(tmp_path / "data"), publish_update=lambda update: asyncio.sleep(0), instructions="CALLER-PRIVATE")
+        await runtime.start()
+        try:
+            prompt = runtime.runtime_host.get_plugin("prompt")
+            board = runtime.runtime_host.get_plugin("blackboard")
+            assert "WORKSPACE-OLD" in prompt._system_prompt
+            assert "CALLER-PRIVATE" in prompt._system_prompt
+            assert "prompt" in board.required_context_sources
+            assert "prompt" in board.fatal_context_sources
+            before = prompt._system_prompt
+            (tmp_path / "AGENTS.md").write_text("WORKSPACE-NEW")
+            assert prompt._system_prompt == before
+        finally:
+            await runtime.stop("test")
+    asyncio.run(run())
 
 
-def test_default_system_prompt要求普通聊天简短自然且不暴露记忆机制():
-    assert "不要说“根据记忆库”" in DEFAULT_SYSTEM_PROMPT
-    assert "自然说“我记不起来了”" in DEFAULT_SYSTEM_PROMPT
-    assert "不要说“没有召回到记忆”" in DEFAULT_SYSTEM_PROMPT
-    assert "“没有关于你的记忆”" in DEFAULT_SYSTEM_PROMPT
-    assert "“记忆库为空”" in DEFAULT_SYSTEM_PROMPT
-    assert "不要据此断言长期记忆不存在" in DEFAULT_SYSTEM_PROMPT
+def test_default_system_prompt保留通用约束而不绑定业务插件():
+    assert "授权" in DEFAULT_SYSTEM_PROMPT
+    assert "验证" in DEFAULT_SYSTEM_PROMPT
+    assert "不伪造" in DEFAULT_SYSTEM_PROMPT
+    assert "长期记忆" not in DEFAULT_SYSTEM_PROMPT
+    assert "memory_recall" not in DEFAULT_SYSTEM_PROMPT
+
+
+def test_default_system_prompt要求普通聊天简短自然():
     assert "普通聊天默认简短、自然、直接" in DEFAULT_SYSTEM_PROMPT
     assert "复杂任务" in DEFAULT_SYSTEM_PROMPT
     assert "按需要完整展开" in DEFAULT_SYSTEM_PROMPT

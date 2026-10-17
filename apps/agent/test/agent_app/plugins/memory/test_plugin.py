@@ -154,7 +154,9 @@ def test_automatic_recall先确认context再完成region():
         return backend, published
 
     backend, events = asyncio.run(run())
-    assert [type(event) for event in events] == [
+    from agent_app.contracts.prompt import PromptContributionEvent
+    assert isinstance(events[0], PromptContributionEvent)
+    assert [type(event) for event in events[1:]] == [
         BlackboardRegionUpdatedEvent, TaskContextInputEvent,
         BlackboardRegionUpdatedEvent,
     ]

@@ -1,6 +1,10 @@
 """Agent-visible Skill management Plugin."""
 
 
+import asyncio
+from agent_app.contracts.prompt import PromptContributionEvent, PromptSection
+from agent_app.plugins.skill.prompts import discovery_guidance
+from icarus.core.contracts.input import UserInputEvent
 from agent_app.plugins.skill.config import PluginConfig
 from icarus.core.capabilities import ConversationReadRequest, ConversationReadResponse
 from icarus.core.plugin import handles
@@ -88,9 +92,21 @@ class SkillPlugin(BasePlugin):
         await self.job_manager.start()
 
     def accepts_event(self, source_plugin_id: str, event: Event) -> bool:
-        return source_plugin_id == self.agent_plugin_id and isinstance(
-            event, TaskContextInputResultEvent
+        return isinstance(event, UserInputEvent) or (
+            source_plugin_id == self.agent_plugin_id and isinstance(event, TaskContextInputResultEvent)
         )
+
+    @handles(UserInputEvent)
+    async def on_prompt_input(self, source_plugin_id: str, event: UserInputEvent):
+        if event.task_id is None:
+            return None
+        try:
+            skills = await asyncio.to_thread(self.catalog.list_skills)
+            content = discovery_guidance(skills, allow_produce=self.allow_produce, allow_evolve=self.allow_evolve)
+            return (PromptContributionEvent(task_id=event.task_id, status="completed",
+                sections=(PromptSection("skill-discovery", "contributor", content),)),)
+        except Exception:
+            return (PromptContributionEvent(task_id=event.task_id, status="failed", error="skill_catalog_unavailable"),)
 
     @handles(TaskContextInputResultEvent)
     async def on_event(self, source_plugin_id: str, event: Event) -> None:

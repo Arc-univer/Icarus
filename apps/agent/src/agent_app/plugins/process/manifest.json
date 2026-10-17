@@ -3,6 +3,7 @@
   "plugin_id": "process",
   "plugin_version": "1.0.0",
   "entrypoint": "agent_app.plugins.process.factory:create_plugin",
+  "contracts": "agent_app.contracts.prompt",
   "python_requires": [],
   "required_capabilities": [],
   "provided_capabilities": [],
@@ -10,9 +11,10 @@
     "background_process"
   ],
   "published_events": [
+    "prompt.contribution",
     "process.updated"
   ],
-  "consumed_events": [],
+  "consumed_events": ["input.user_input"],
   "state_scopes": [],
   "tier": "core",
   "required_config": []

@@ -73,7 +73,7 @@ class RuntimeFactory:
     error: BaseException | None = None
     created: list = field(default_factory=list)
 
-    def __call__(self, identity, *, config, publish_update, logger):
+    def __call__(self, identity, *, config, publish_update, logger, instructions=None):
         runtime = SessionStub(
             identity, config, publish_update, self.gate, self.error
         )

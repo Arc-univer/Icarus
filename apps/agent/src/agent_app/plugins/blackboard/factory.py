@@ -60,9 +60,9 @@ def create_plugin(
     region_store = RegionStore(region_registry)
     plugin = BlackboardPlugin(
         plugin_id,
-        required_context_sources=set(
-            config.get("required_context_sources", [])
-        ),
+        required_context_sources=set(config.get("required_context_sources", [])) | {"prompt"},
+        fatal_context_sources=set(config.get("fatal_context_sources", [])) | {"prompt"},
+        prompt_provider_enabled=True,
         model_role=model_role,
         system_prompt=str(config.get("system_prompt", "")),
         tools=config.get("tools"),

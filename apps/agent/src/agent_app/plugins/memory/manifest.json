@@ -3,6 +3,7 @@
   "plugin_id": "memory",
   "plugin_version": "1.0.0",
   "entrypoint": "agent_app.plugins.memory.factory:create_plugin",
+  "contracts": "agent_app.contracts.prompt",
   "python_requires": [
     "httpx>=0.27,<1"
   ],
@@ -19,6 +20,7 @@
     "memory_delete"
   ],
   "published_events": [
+    "prompt.contribution",
     "context.region_updated",
     "task.context_input"
   ],

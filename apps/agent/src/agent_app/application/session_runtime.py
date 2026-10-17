@@ -23,13 +23,10 @@ from icarus.core.runtime_update import RuntimeUpdate
 UpdatePublisher = Callable[[RuntimeUpdate], Awaitable[None]]
 
 
-DEFAULT_SYSTEM_PROMPT = """你是 Icarus Agent。准确理解用户目标，必要时使用工具完成任务，并在完成后给出清晰的结果。
-
-长期记忆是你与当前用户持续相处形成的、你自己的长期记忆，也是你保持连续性的一部分。自然使用你记得的事实、偏好、约定和决定，不要说“根据记忆库”“检索结果显示”或用查看外部资料的口吻回答，也不要为了展示记忆而复述用户的历史。默认相信相关记忆；如果用户当前明确纠正了旧信息，以用户当前的明确说法为准，并在合适时更新原有记忆。当自动记忆或 memory_recall 没有找到相关内容时，这只表示你此刻想不起来；面向用户自然说“我记不起来了”，不要说“没有召回到记忆”“没有关于你的记忆”或“记忆库为空”，也不要据此断言长期记忆不存在。
-
-你可以自主记录和维护值得跨会话保留的明确偏好、稳定事实、协作约定、重要决定和纠正，无需每次征求用户确认。新增内容使用记忆写入能力，明确纠正优先更新已有记忆。不要记录闲聊细节、临时状态、猜测、未经确认的推断，也不要记录密码、Token、Cookie、私钥或其他认证凭据。用户明确要求不要记住时不要记录。除非用户询问或当前任务需要，不要机械汇报内部的记忆写入或更新动作。删除或遗忘前先确认目标和范围。
-
-普通聊天默认简短、自然、直接，像人与人正常交流一样，只说足够回答当前问题的内容。用户要求详细解释，或复杂任务需要步骤、风险、证据和交付结果时，再按需要完整展开。"""
+from agent_app.contracts.prompt import PromptContributor, PromptError
+from agent_app.plugins.prompt.base_prompt import DEFAULT_SYSTEM_PROMPT
+from agent_app.plugins.prompt.composer import prompt_context_block
+from icarus.core.tools.result_budget import conservative_token_count
 
 
 class SessionRuntime(SessionHost):
@@ -44,6 +41,7 @@ class SessionRuntime(SessionHost):
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         tools: list[str] | None = None,
         initial_messages: list[Message] | None = None,
+        instructions: str | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.identity = identity
@@ -72,6 +70,11 @@ class SessionRuntime(SessionHost):
             required_plugin_ids=frozenset(required),
             plugin_configs=self._with_facilities({
                 **config.runtime.plugin_config,
+                "prompt": {
+                    **config.runtime.plugin_config.get("prompt", {}),
+                    "instructions": instructions,
+                    "base_prompt": system_prompt,
+                },
                 "persistence": {
                     **config.runtime.plugin_config.get("persistence", {}),
                     "data_dir": config.icarus_data_dir,
@@ -110,7 +113,6 @@ class SessionRuntime(SessionHost):
                 "blackboard": {
                     **config.runtime.plugin_config.get("blackboard", {}),
                     "model_role": config.model_roles.agent,
-                    "system_prompt": system_prompt,
                     "tools": tools,
                     "initial_messages": list(initial_messages or []),
                     "config_model": config,
@@ -186,11 +188,49 @@ class SessionRuntime(SessionHost):
 
     async def _finalize_links(self, host):
         from agent_app.plugins.blackboard.plugin import BlackboardPlugin
+        from agent_app.plugins.prompt.plugin import PromptPlugin
         active = set(host.graph.registrations)
-        for registration in host.graph.registrations.values():
+        prompt = next(r.plugin for r in host.graph.registrations.values() if isinstance(r.plugin, PromptPlugin))
+        boards = [r.plugin for r in host.graph.registrations.values() if isinstance(r.plugin, BlackboardPlugin)]
+        if not boards:
+            raise PromptError("prompt_source_failed", "Prompt context consumer is unavailable")
+        board = boards[0]
+        prompt.context_result_source_id = host.graph.provider_id("task.control")
+
+        def measure(system: str, content: str) -> int:
+            serialized = board.prompt_composer.serialize_context([prompt_context_block(content)]) if content else ""
+            wrapper = "<plugin_context>\n" + serialized + "\n</plugin_context>" if serialized else ""
+            return conservative_token_count(system) + conservative_token_count(wrapper)
+
+        def validate(system: str, content: str) -> None:
+            if measure(system, content) > prompt.config.max_prompt_tokens:
+                raise PromptError("prompt_too_large", "System and dynamic prompts exceed the total budget")
+
+        static = {}
+        dynamic = set()
+        updates = set()
+        required = frozenset(prompt.config.required_contributors)
+        for plugin_id, registration in host.graph.registrations.items():
             plugin = registration.plugin
-            if isinstance(plugin, BlackboardPlugin):
-                plugin.region_registry.remove_inactive_owners(active)
-                plugin.region_store.initialize()
-                plugin.region_registry.freeze()
+            if isinstance(plugin, PromptContributor):
+                try:
+                    static[plugin_id] = plugin.static_prompt_sections()
+                except Exception:
+                    if plugin_id in required:
+                        raise PromptError("prompt_source_failed", "Required static prompt contributor failed") from None
+                    self.logger.warning("Optional static prompt omitted: source=%s", plugin_id)
+            manifest = host.graph.discovered[plugin_id].manifest
+            if "prompt.contribution" in manifest.published_events:
+                if "input.user_input" not in manifest.consumed_events:
+                    raise PromptError("prompt_invalid", "Dynamic prompt contributor must consume user input")
+                dynamic.add(plugin_id)
+            if "prompt.update" in manifest.published_events:
+                updates.add(plugin_id)
+        prompt.prepare(static, dynamic_sources=frozenset(dynamic), update_sources=frozenset(updates),
+                       required_sources=required, measure_dynamic=measure)
+        for board in boards:
+            board.validate_prompt_context = validate
+            board.region_registry.remove_inactive_owners(active)
+            board.region_store.initialize()
+            board.region_registry.freeze()
 

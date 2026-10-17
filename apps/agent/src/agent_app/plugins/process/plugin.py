@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import PromptContributionEvent, PromptSection
+from agent_app.plugins.process.prompts import PROCESS_GUIDANCE
+from icarus.core.contracts.input import UserInputEvent
+from icarus.core.plugin import handles
 from agent_app.plugins.process.config import PluginConfig
 
 import asyncio
@@ -58,6 +62,13 @@ class ProcessPlugin(BasePlugin):
             ),
             publish_snapshot=self._publish_snapshot,
         )
+
+    @handles(UserInputEvent)
+    async def on_prompt_input(self, source_plugin_id: str, event: UserInputEvent):
+        if event.task_id is None:
+            return None
+        return (PromptContributionEvent(task_id=event.task_id, status="completed",
+            sections=(PromptSection("process-use", "contributor", PROCESS_GUIDANCE),)),)
 
     async def start(self) -> None:
         with self._lifecycle_lock:

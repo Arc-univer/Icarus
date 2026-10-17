@@ -4,6 +4,7 @@ from icarus.core.run_control.channel import (
     AgentRunCancelled,
     MaxStepsExceededError,
     TaskChannel,
+    format_runtime_context,
 )
 from icarus.core.run_control.events import (
     TaskCancelRequestedEvent,
@@ -27,6 +28,7 @@ from icarus.core.run_control.types import (
 )
 
 __all__ = [
+    "format_runtime_context",
     "AgentRunControl",
     "AgentRunCancelled",
     "MaxStepsExceededError",

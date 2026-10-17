@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import PromptContributionEvent, PromptSection
+from agent_app.plugins.mcp.prompts import MCP_GUIDANCE
+from icarus.core.contracts.input import UserInputEvent
+from icarus.core.plugin import handles
 from agent_app.plugins.mcp.config import PluginConfig
 
 import asyncio
@@ -36,6 +40,13 @@ class MCPPlugin(BasePlugin):
         self.result_converter = result_converter or MCPResultConverter()
         self.redactor = redactor or Redactor()
         self._accepting = False
+
+    @handles(UserInputEvent)
+    async def on_prompt_input(self, source_plugin_id: str, event: UserInputEvent):
+        if event.task_id is None:
+            return None
+        sections = (PromptSection("mcp-use", "contributor", MCP_GUIDANCE),) if self.manager.server_names else ()
+        return (PromptContributionEvent(task_id=event.task_id, status="completed", sections=sections),)
 
     async def start(self) -> None:
         self._accepting = True
