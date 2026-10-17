@@ -3,7 +3,7 @@ ARGS ?=
 APP ?=
 REPO_ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
-.PHONY: install install-dev install-commands install-agent install-gateway install-tui start stop status gateway tui mem0-up mem0-down mem0-logs openkb-up openkb-down openkb-logs webui-up webui-down webui-logs test test-agent test-gateway test-tui test-mem0 test-openkb test-mem0-full test-openkb-full
+.PHONY: install install-dev install-commands install-agent install-gateway install-tui start stop status gateway tui mem0-up mem0-down mem0-logs openkb-up openkb-down openkb-logs webui-up webui-down webui-logs test test-agent test-gateway test-tui test-mem0 test-openkb test-mem0-full test-openkb-full typecheck-agent check-package-agent
 
 install:
 	PYTHON="$(PYTHON)" "$(REPO_ROOT)/bin/icarus" install $(APP)
@@ -70,6 +70,12 @@ test:
 
 test-agent:
 	"$(REPO_ROOT)/apps/agent/scripts/test.sh"
+
+typecheck-agent:
+	bash "$(REPO_ROOT)/apps/agent/scripts/typecheck.sh"
+
+check-package-agent:
+	bash "$(REPO_ROOT)/apps/agent/scripts/check-package.sh"
 
 test-gateway:
 	"$(REPO_ROOT)/apps/gateway/scripts/test.sh"

@@ -24,6 +24,8 @@ __pycache__/
 .coverage.*
 htmlcov/
 node_modules/
+apps/agent/build/
+apps/agent/dist/
 apps/mem0/build/
 apps/mem0/dist/
 apps/openkb/build/
