@@ -49,11 +49,18 @@ class PersonRepository:
             "WITH p,collect(a) AS aliases "
             "WHERE ($archived OR p.status='active') AND ($kind='' OR p.kind=$kind) AND p.person_id>$after "
             "AND ($q='' OR toLower(p.display_name) CONTAINS $q OR any(a IN aliases WHERE toLower(a.value) CONTAINS $q OR toLower(coalesce(a.display_value,'')) CONTAINS $q)) "
-            "RETURN p ORDER BY p.person_id LIMIT $limit",
+            "RETURN p,aliases[0..10] ORDER BY p.person_id LIMIT $limit",
             {"q": query.lower(), "archived": include_archived, "kind": kind or "", "after": after, "limit": limit})
-        result = [properties(row[0]) for row in rows]
-        for item in result:
+        result = []
+        for row in rows:
+            item = properties(row[0])
             item.pop("special_kind", None)
+            item["aliases"] = [
+                {key: value for key, value in properties(alias).items()
+                 if key in {"alias_id", "namespace", "value", "display_value"}}
+                for alias in row[1] if alias is not None
+            ]
+            result.append(item)
         return result
 
     async def patch(self, person_id: str, changes: dict):

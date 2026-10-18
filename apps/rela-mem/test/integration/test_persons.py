@@ -14,6 +14,25 @@ def test_person_alias_search_and_identity_resolution(client):
     assert {p["person_id"] for p in matches} == {first, second}
 
 
+def test_search_candidates_include_bounded_aliases(client):
+    aliases = [{"namespace": "qq", "value": str(10000 + index), "display_value": f"昵称{index}"} for index in range(12)]
+    first = person(client, "候选同名", aliases)
+    second = person(client, "候选同名", [{"namespace": "wechat", "value": "other"}])
+    page = client.get("/v1/persons", params={"query": "候选同名", "limit": 1}).json()
+    next_page = client.get("/v1/persons", params={"query": "候选同名", "limit": 1, "cursor": page["next_cursor"]}).json()
+    items = page["items"] + next_page["items"]
+    assert {item["person_id"] for item in items} == {first, second}
+    assert next_page["has_more"] is False
+    by_id = {item["person_id"]: item for item in items}
+    assert len(by_id[first]["aliases"]) == 10
+    assert {alias["value"] for alias in by_id[first]["aliases"]} <= {str(10000 + index) for index in range(12)}
+    assert by_id[second]["aliases"][0]["value"] == "other"
+    for item in items:
+        for alias in item["aliases"]:
+            assert set(alias) <= {"alias_id", "namespace", "value", "display_value"}
+    assert client.get("/v1/persons", params={"query": "绝无候选"}).json()["items"] == []
+
+
 def test_alias_conflict_rolls_back_person_creation(client):
     first = person(client, aliases=[{"namespace": "qq", "value": "12345"}])
     response = client.post("/v1/persons", json={"display_name": "不应残留", "aliases": [{"namespace": "qq", "value": "12345"}]})
