@@ -1,0 +1,10 @@
+.venv
+.git
+.env
+settings.json
+*.local.json
+__pycache__
+.pytest_cache
+*.egg-info
+test
+docs

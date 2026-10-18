@@ -1,0 +1,59 @@
+name: icarus-rela-mem
+services:
+  rela-mem:
+    image: rela-mem:dev
+    build: .
+    ports:
+      - "${RELA_MEM_BIND_ADDRESS:-127.0.0.1}:${RELA_MEM_PORT:-8767}:8767"
+    environment:
+      RELA_MEM_CONFIG: /app/config/settings.json
+      RELA_MEM_API_TOKEN: ${RELA_MEM_API_TOKEN:?Set RELA_MEM_API_TOKEN}
+      RELA_MEM_FALKORDB_PASSWORD: ${RELA_MEM_FALKORDB_PASSWORD:?Set RELA_MEM_FALKORDB_PASSWORD}
+      RELA_MEM_PG_PASSWORD: ${RELA_MEM_PG_PASSWORD:?Set RELA_MEM_PG_PASSWORD}
+    volumes:
+      - type: bind
+        source: ${RELA_MEM_SETTINGS_FILE:-./settings.example.json}
+        target: /app/config/settings.json
+        read_only: true
+    depends_on:
+      falkordb:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8767/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  falkordb:
+    image: falkordb/falkordb:v4.22.1
+    environment:
+      BROWSER: "0"
+      RELA_MEM_FALKORDB_PASSWORD: ${RELA_MEM_FALKORDB_PASSWORD:?Set RELA_MEM_FALKORDB_PASSWORD}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - 'exec redis-server --requirepass "$$RELA_MEM_FALKORDB_PASSWORD" --dir /var/lib/falkordb/data --appendonly yes --loadmodule /var/lib/falkordb/bin/falkordb.so'
+    ports:
+      - "${RELA_MEM_DB_BIND_ADDRESS:-127.0.0.1}:${RELA_MEM_FALKORDB_HOST_PORT:-16379}:6379"
+    volumes:
+      - ${ICARUS_DATA_DIR:?Set ICARUS_DATA_DIR}/services/rela-mem/falkordb:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$RELA_MEM_FALKORDB_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: rela_mem
+      POSTGRES_DB: rela_mem
+      POSTGRES_PASSWORD: ${RELA_MEM_PG_PASSWORD:?Set RELA_MEM_PG_PASSWORD}
+    ports:
+      - "${RELA_MEM_DB_BIND_ADDRESS:-127.0.0.1}:${RELA_MEM_PG_HOST_PORT:-15432}:5432"
+    volumes:
+      - ${ICARUS_DATA_DIR:?Set ICARUS_DATA_DIR}/services/rela-mem/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rela_mem -d rela_mem"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

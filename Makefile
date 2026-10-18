@@ -94,3 +94,11 @@ test-mem0-full:
 
 test-openkb-full:
 	bash "$(REPO_ROOT)/apps/openkb/scripts/test.sh" --full
+
+.PHONY: test-rela-mem test-rela-mem-integration
+
+test-rela-mem:
+	bash "$(REPO_ROOT)/apps/rela-mem/scripts/test.sh"
+
+test-rela-mem-integration:
+	bash "$(REPO_ROOT)/apps/rela-mem/scripts/test.sh" --integration
