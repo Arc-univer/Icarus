@@ -158,7 +158,13 @@ class MemoryRememberTool(_MemoryTool):
                 "agreement, decision, or correction that will remain useful "
                 "across conversations, without asking for confirmation. Do not "
                 "store temporary details, guesses, credentials, or anything the "
-                "user asked you not to remember."
+                "user asked you not to remember. When relationship tools are "
+                "enabled, store stable person profiles/preferences/identities "
+                "with relationship_remember and relations with relationship_relate; "
+                "use memory_remember for events/experiences, without duplicating "
+                "person profiles. If relationship is not enabled, keep the original "
+                "stable-fact behavior. A service failure is not permission to "
+                "silently redirect failed profile writes into Memory."
             ),
             {
                 "type": "object",

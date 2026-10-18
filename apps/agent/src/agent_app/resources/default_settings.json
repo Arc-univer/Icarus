@@ -23,6 +23,10 @@
         "user_id": "removel",
         "agent_id": "icarus"
       },
+      "relationship": {
+        "endpoint": "http://127.0.0.1:8767",
+        "timeout_seconds": 10
+      },
       "knowledge": {
         "knowledge_base": "icarus-project"
       }
