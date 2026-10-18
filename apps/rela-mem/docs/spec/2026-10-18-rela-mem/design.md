@@ -396,7 +396,29 @@ ORDER BY attr_key;
 | DELETE | `/v1/relations/{relation_id}` | 标记关系失效 |
 | GET | `/v1/graph/shortest-path` | 最短关系路径 |
 
-### 4.3 关键请求/响应
+### 4.3 人物搜索候选别名
+
+Agent 的 `relationship_find` 需要展示候选别名，用于重名消歧。`GET /v1/persons?query=` 的每个结果在现有 Person 字段外增加：
+
+```json
+{
+  "person_id": "p_01J...",
+  "display_name": "张三",
+  "kind": "human",
+  "status": "active",
+  "aliases": [
+    {"alias_id": "a_01J...", "namespace": "qq", "value": "123456", "display_value": "小张"}
+  ]
+}
+```
+
+- 每个候选最多返回 10 个别名；这是展示摘要，不能据截断列表排除其他姓名别名；
+- 姓名/别名搜索为子串候选，不等价于精确同名，精确人物判断由调用方核验；
+- 只返回 `alias_id`、`namespace`、`value`、`display_value`，不暴露 `normalized_value`、`identity_key`；
+- 不改变分页、过滤、权限和空结果语义；
+- 该字段属于搜索候选展示，不是新的 `/context` 端点。
+
+### 4.4 关键请求/响应
 
 #### 创建人物
 

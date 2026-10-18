@@ -255,6 +255,19 @@ curl -s localhost:8767/healthz
 - `git diff --check` 通过；
 - 重启 Compose 后数据仍在。
 
+### Phase 6：Agent 候选别名
+
+为 Agent 的 `relationship_find` 提供重名消歧信息：
+
+- 修改 `GET /v1/persons?query=`，每个结果附带最多 10 个 aliases；
+- 只返回 `alias_id`、`namespace`、`value`、`display_value`；
+- 不改变分页、过滤、权限和空结果语义；
+- 增加集成测试：两个同名人物返回各自别名；分页不重复；未命中返回空列表。
+
+该阶段是 agent relationship 插件的前置依赖，实施时与插件任务分开提交。
+
+2026-10-19 实施验证：已完成安全字段投影和每人最多10条别名；`test_search_candidates_include_bounded_aliases` 先因缺失 aliases 失败，再通过。真实隔离数据库中 persons 测试4项、rela-mem 全量49项通过；覆盖同名候选各自别名、超10条、person_id分页和空结果。未修改其他服务能力，未提交/推送。
+
 ## 3. 测试与验证顺序
 
 每阶段按以下顺序执行：

@@ -28,6 +28,8 @@ HTTP 请求由 Pydantic 校验，统一将请求参数错误转为 400；服务�
 
 节点为 `Person`、`Alias`、`Circle`，边为 `HAS_ALIAS`、`MEMBER_OF`、`RELATED_TO`。精确 Alias 使用计算属性 `identity_key` 唯一；`name` 不设置该属性，允许重名。人物的私有 `special_kind` 唯一属性限制 user/agent 各一个；普通 API 不能创建或更改特殊身份类别。
 
+人物搜索按 display_name、alias.value/display_value 子串返回候选，不证明同一身份。每项附最多10个别名，仅投影 alias_id/namespace/value/display_value，先按人物聚合再按 person_id 分页；人物详情仍保留完整别名供调用方核验。
+
 人物和初始别名在一个图查询内原子创建；唯一冲突不会留下无别名的新人物。Alias 删除同时清除该节点和归属边。成员以 `[person_id,circle_id]` 的确定性 JSON 编码唯一，离开时仅置 `left`。
 
 双向关系规范化端点与称谓，只存一条边。`a→b` 始终指 a 是 b 的正向称谓；原始 `direction=one_way|two_way` 与查询投影 `relative_direction` 分离。双向内容 PATCH 必须同时提交正反内容。关系变更重算唯一键，冲突由数据库原子回滚。PATCH 的读后重建在同一图写查询内比较已读字段，发现并发变化返回 409，不覆盖期间的状态或称谓；DELETE 只原子设置失效字段，不重建旧快照。没有新增 version 字段。失效只置 `invalid`，不提供关系变更史。

@@ -19,7 +19,7 @@ Do not use repository-root PYTHONPATH as a replacement for installing Agent. Gat
 own existing repository bootstrap for root-owned protocol/environment modules.
 
 `make typecheck-agent` checks both canonical Python packages; `make check-package-agent` builds a wheel,
-checks all 12 manifests and packaged defaults, and installs it into a disposable verification environment.
+checks all 13 manifests and packaged defaults, and installs it into a disposable verification environment.
 Gateway's suite includes a real TCP/WebSocket test with production runtime/plugins/SQLite and deterministic
 local HTTP fixtures for external services; it is not a remote-model smoke.
 
