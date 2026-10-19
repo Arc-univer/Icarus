@@ -1,6 +1,7 @@
 # rela-mem 后端架构
 
-本文依据 `src/`、`test/`、Dockerfile 和 Compose 描述当前实现，不把 Agent/Argus 适配写成已有能力。目标设计见 [design.md](design.md)，阶段与验证记录见 [plan.md](plan.md)。
+本文依据 `src/`、`test/`、Dockerfile 和 Compose 描述当前实现。Agent 已通过独立 HTTP 插件消费服务，
+但本应用不导入该插件；Argus 不在接入范围。目标设计见 [design.md](design.md)，阶段与验证记录见 [plan.md](plan.md)。
 
 ## 边界
 
@@ -48,9 +49,35 @@ HTTP 请求由 Pydantic 校验，统一将请求参数错误转为 400；服务�
 
 应用启动等待 FalkorDB 索引和约束 `OPERATIONAL`，然后建 PG 表、检查并创建特殊身份。已有特殊身份与配置冲突会失败，不自动迁移、覆盖或删除长期数据。
 
-本期只提供 app 自己的 `scripts/install.sh`、`test.sh`、`manage.py` 与初始化脚本；根 Makefile 增加两个测试入口，没有接入根 `icarus` 全栈生命周期。
+根 `icarus.toml` 已将 rela-mem 注册为默认 Compose 应用，required 依赖独立 PostgreSQL/FalkorDB；
+`icarus start rela-mem` 先启动 required 本地依赖或探测 remote 依赖，显式 stop 只停应用。
+共享数据库的 Compose 归根 `infra/`，应用自己的 Compose 仅含 API；保留
+`$ICARUS_DATA_DIR/services/rela-mem/{postgres,falkordb}` 的原 bind mount。
+**切换旧三合一部署前必须手动停旧项目，不能同时挂载相同目录；无自动挂载碰撞保护。**
+控制面不迁移、清空数据，remote stop 不操作远程资源。
+详细运维拓扑归 [统一生命周期架构](../../../../../docs/spec/2026-10-19-component-lifecycle/arch.md)，
+本应用仍可通过自己的 `scripts/install.sh`、`manage.py` 和初始化脚本独立运行。
 
-镜像只拷贝本应用源码和脚本，使用非 root 用户；配置只读挂载，Secret 由环境注入。Compose 同时提供 API/FalkorDB/PG，数据显式挂载在 `$ICARUS_DATA_DIR/services/rela-mem/`。API 默认宿主端口 8767，数据库 16379/15432，均默认绑定 loopback，可配置私网地址。
+镜像只拷贝本应用源码和脚本，使用非 root 用户；身份 JSON 只读挂载，三个 Secret 由环境注入。
+`RELA_MEM_SETTINGS_FILE` 是 Compose 挂载源；容器内 `RELA_MEM_CONFIG=/app/config/settings.json`。
+应用发布端口默认 `127.0.0.1:8767`，本机数据库默认 `16379/15432`。
+本地同一共享网络的 Compose 消费方由控制面注入 `postgres:5432` / `falkordb:6379`；
+原生消费方与 remote 数据库使用注册 host/port。远程 PostgreSQL 角色、数据库和权限须预先存在；
+应用只初始化自身 schema/表和图结构，不负责远程实例创建或凭据轮换。
+
+### 配置加载边界
+
+`config.load_settings(path=None, environ=None)` 保持 standalone：JSON 提供身份、监听地址、超时等业务配置；
+三个 Secret 仅从环境读取。连接字段支持环境优先于 JSON 的八项覆盖：
+`RELA_MEM_PG_HOST/PORT/DATABASE/USER/SCHEMA`、`RELA_MEM_FALKORDB_HOST/PORT/GRAPH`。
+缺少变量保留文件值/模型默认值，显式空值不回退，端口经 Pydantic 转整数并校验 `1..65535`。
+错误信息隐藏输入值，Secret 在 repr 中脱敏且不序列化。`schema` 仍映射原有 `schema_name` 字段。
+
+未传 `environ` 时沿用仓库根 `.env` 发现与 `override=False`；显式 mapping 是路径、Secret 和连接覆盖的
+唯一来源，不加载 dotenv、不合并进程环境、不修改输入映射或 JSON。独立默认连接为 loopback
+`16379/15432`；应用不读取根 TOML，也不导入控制面。
+`RELA_MEM_BIND_ADDRESS/PORT` 只用于 Compose 发布，不覆盖 standalone `server.host/port`。
+加载器行为由 `test/test_config.py` 固定；运行命令见 [README](../../../README.md)。
 
 ## 验证边界
 

@@ -12,6 +12,14 @@
 
 配置仅 endpoint（默认 `http://127.0.0.1:8767`）和严格整数 timeout_seconds（1–60、默认10）。Token 仅从进程环境 `RELA_MEM_API_TOKEN` 读取；非 loopback 强制 HTTPS 且必须 Token。拒绝带凭据、路径、query、fragment 的 URL，不跟随重定向。loopback 可无 Token 构建以便 Session 启动，但后端业务 API 仍要求认证。
 
+`agent_app.config.config_loader.get_config` 在读取 JSON 后，将已设置的 `ICARUS_RELATIONSHIP_ENDPOINT`
+覆盖到 `runtime.plugin_config.relationship.endpoint`；同一路径分别支持 `ICARUS_MEM0_ENDPOINT` 和
+`ICARUS_OPENKB_ENDPOINT`。只创建/更新对应 endpoint 字段，不修改 timeout、插件启用列表或其他业务配置，
+不回写文件。变量未设置时保留 JSON；实际插件构造仍执行原 HTTPS/Token 校验。
+控制面按 embedded Agent 的声明向 Gateway 注入连接值；应用不读取根 TOML、不导入控制面。
+加载器测试覆盖字段保持、缺失配置槽与未设置回退；运维拓扑见
+[统一生命周期架构](../../../../../docs/spec/2026-10-19-component-lifecycle/arch.md)。
+
 `RelaMemHttpAdapter` 隔离 REST 路径、认证、请求体、分页和响应投影。读失败不伪装成未命中；只有精确 resolve 的200/person:null表示未绑定。非2xx仅保留状态码，连接/超时及非法响应映射安全错误，不暴露正文/凭据/远端堆栈，不重试写请求。
 
 ## 人物证据与写入保护

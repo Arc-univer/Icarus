@@ -106,6 +106,14 @@ ICARUS_OPENKB_LLM_API_KEY=your-knowledge-model-key
 `model_settings` 为含唯一 `name` 的数组，`model_roles` 分别选择 agent/compaction/skill_generation/title；
 旧 thinking/perception 映射在加载时转换，后续统一使用 `get_model(name)`。
 `runtime.update_queue_capacity` 统一订阅和 Gateway 发送队列的默认容量；显式构造覆盖仍可独立设置。
+
+配置加载器在 JSON 读取后接受连接环境覆盖：`ICARUS_MEM0_ENDPOINT` → `memory.endpoint`、
+`ICARUS_OPENKB_ENDPOINT` → `knowledge.endpoint`、`ICARUS_RELATIONSHIP_ENDPOINT` → `relationship.endpoint`
+（均位于 `runtime.plugin_config`）。只修改对应 endpoint，不改用户/Agent ID、知识库名、timeout、模型角色或
+`required_plugin_ids`，也不启用插件或改写 JSON。未设置变量保留文件值；非 loopback 的知识/关系端点仍遵守
+原有 HTTPS/Token 校验。控制面向 Gateway 进程注入这些值，Agent 不读取根 TOML、不导入控制面。
+关系工具的配置与 HTTP 边界见 [relationship 架构](docs/spec/2026-10-18-relationship-plugin/arch.md)。
+
 Mem0 服务通过 `icarus start mem0` 启动，数据位于 `$ICARUS_DATA_DIR/services/mem0`。
 `runtime.plugin_config.memory` 的必填项只有稳定 `user_id` 和 `agent_id`；endpoint、top_k、threshold、
 上下文预算与 5 秒 deadline 有默认值。`preserve_input_language` 默认开启，使 Mem0 在保持

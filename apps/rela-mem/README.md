@@ -2,52 +2,105 @@
 
 独立人物关系与档案服务。Mem0 记录事件/经历；rela-mem 保存人物身份、圈子、关系和档案。分类由调用方负责，本服务不运行 LLM，不导入 Agent/Gateway/Argus。
 
-## 启动
+## 统一启动
 
-需要 Python 3.12 与 Docker Compose。
+从仓库根使用 `./bin/icarus`；短命令 `icarus` 需要先安装命令链接。根控制面需要 Python 3.11+，
+本地容器需要 Docker Compose；独立本机开发环境需要 Python 3.12。
 
-```bash
-bash apps/rela-mem/scripts/install.sh
-```
-
-复制 `settings.example.json` 到部署用配置文件，修改 `identity.user` 与 `identity.agent`。当前设备可配置 `removel / 鱼梦`、`icarus / Icarus`；这不是其他部署的默认用户。
-
-在仓库根 `.env` 或进程环境设置以下值（不要提交真实值）：
+复制 `settings.example.json` 到自己的部署配置，修改 `identity.user` 与 `identity.agent`。
+示例身份不是任何实际用户的部署默认值；已有特殊身份冲突会拒绝启动，不能靠改配置重绑身份。
+在仓库根 `.env` 或进程环境填写（不要提交真实值）：
 
 ```dotenv
 ICARUS_DATA_DIR=/absolute/path/to/icarus-data
 RELA_MEM_API_TOKEN=<nonempty-token>
 RELA_MEM_FALKORDB_PASSWORD=<nonempty-password>
 RELA_MEM_PG_PASSWORD=<nonempty-password>
-RELA_MEM_SETTINGS_FILE=/absolute/path/to/settings.json
+# 可选；不设置时挂载 settings.example.json，不要设置为空的路径覆盖。
+# RELA_MEM_SETTINGS_FILE=/absolute/path/to/settings.json
 ```
-
-从仓库根运行：
 
 ```bash
-docker compose --env-file .env -f apps/rela-mem/docker-compose.yaml up -d --build --wait
+./bin/icarus config validate
+./bin/icarus config show rela-mem
+./bin/icarus install rela-mem       # 构建应用镜像，拉取 required 本地数据库镜像；不启动
+./bin/icarus start rela-mem         # 自动先启动 required postgres/falkordb，再等待应用就绪
+./bin/icarus status rela-mem
+./bin/icarus logs rela-mem --no-follow
+./bin/icarus stop rela-mem          # 只停应用，不停共享数据库
 ```
 
-默认仅绑定 loopback，应用 `8767`、FalkorDB `16379`、PostgreSQL `15432`。通过 `RELA_MEM_BIND_ADDRESS` 和 `RELA_MEM_DB_BIND_ADDRESS` 配置用户自有服务器的私网地址；不要将无 TLS 的数据库开放到公网。外部数据库部署可以只启动应用服务（`up --no-deps rela-mem`），并在 JSON 中配置远端连接信息。
+`config` 命令不需要 Docker/凭据，不解析 Secret 值。实际输出包含 `configuration valid (10 components)`
+（默认注册表）和带来源路径的有效元数据；运行状态按环境报告，不能把配置校验当作数据库连通验收。
+默认本地端口是应用 `8767`、FalkorDB `16379`、PostgreSQL `15432`，均绑定 loopback。
+统一入口通过注册表注入监听与连接字段；不要再用旧 `RELA_MEM_DB_BIND_ADDRESS` 管理拆出的数据库。
 
-持久数据是明确的 bind mount：
+已有远程数据库在 ignored `icarus.local.toml` 中设置 `components.postgres` / `components.falkordb`
+的 `mode = "remote"`、`host` 和 `port`。可复制根 `icarus.local.toml.example`；它默认是 remote 隧道示例，
+全本地部署请删除这两个覆盖表。remote 只探测，不创建、安装或停止远程数据库。
+PostgreSQL 角色/数据库及权限必须预先存在；应用可初始化自己的 schema/表，但不创建远端登录角色或数据库。
+密码仍来自环境。原生进程可用宿主机隧道；容器必须使用容器可达地址，不能把容器内 `localhost` 当作宿主机。
+完整工作流见 [infra 运维说明](../../infra/README.md)。
+
+**迁移部署方式前，必须手动停止旧三合一 Compose 项目；新旧容器不能同时挂载相同数据库目录。**
+没有自动挂载碰撞保护，不做自动数据迁移。独立数据库保留原路径：
 
 ```text
 $ICARUS_DATA_DIR/services/rela-mem/falkordb
 $ICARUS_DATA_DIR/services/rela-mem/postgres
 ```
 
-`docker compose down` 不会删除这些数据。镜像本地构建为 `rela-mem:dev`，不自动推送。
+根 `infra/` 分别管理数据库；`apps/rela-mem/docker-compose.yaml` **只含应用服务**，加入共享外部网络。
+统一入口会创建需要的网络并注入 `postgres:5432`、`falkordb:6379`；身份等业务 JSON 不被改写。
+镜像默认本地构建为 `rela-mem:dev`，可用 `RELA_MEM_IMAGE` 选择独立标签，不自动推送。
+`stop` / Compose `down` 不删除上述 bind mount 数据；裸 `icarus stop` 会停止默认 required 闭包中的本地数据库。
+
+### 手动 app-only Compose
+
+仅在自行管理数据库/网络时绕过根控制面。除上面的三个 Secret、配置挂载和数据目录外，必须显式提供下面表中
+**全部八个连接变量**；此 Compose 文件不自动启动数据库，也不会从 JSON 填补缺少的 Compose 插值。
+先准备 `${ICARUS_NETWORK:-icarus}` 外部网络（或复用统一入口已创建的网络），再从仓库根执行：
+
+```bash
+docker compose --env-file .env -f apps/rela-mem/docker-compose.yaml up -d --build --wait
+```
+
+本地共享网络使用 `postgres:5432` / `falkordb:6379`；远端则填容器可达的 host/port。
+不要将未加 TLS 的数据库暴露到公网。应用健康检查为 `/healthz`，业务接口仍需 Token。
 
 ## 本机开发
 
-设置 `RELA_MEM_CONFIG` 指向 JSON 配置；将数据库 host/port 改为本机暴露的端口。应用会在开发时加载仓库根 `.env`（不覆盖已设置的环境变量）；容器只读取注入的环境和挂载配置。
+```bash
+bash apps/rela-mem/scripts/install.sh
+```
+
+设置 `RELA_MEM_CONFIG` 指向自己的 JSON。`settings.example.json` 的数据库默认值为
+`127.0.0.1:16379` / `127.0.0.1:15432`，适合本机连接默认暴露端口；独立进程的监听地址使用 JSON
+`server.host/port`（示例监听 `0.0.0.0`，本机开发可改为 `127.0.0.1`）。
+`RELA_MEM_BIND_ADDRESS` / `RELA_MEM_PORT` 是 Compose 的发布端口设置，不是 standalone loader 的监听覆盖。
+`RELA_MEM_SETTINGS_FILE` 仅是 Compose 挂载源路径；应用内部使用 `RELA_MEM_CONFIG`。
+应用在仓库内开发时加载根 `.env`（`override=False`）；容器只读取注入环境和挂载配置。
+应用不读取根 TOML，也不导入控制器模块；原生**受管**进程的身份/停止实现当前限 Linux `/proc`。
+
+连接环境变量优先于 JSON；未设置的字段保留文件值，再使用原有模型默认值。支持：
+
+| 环境变量 | JSON 字段 |
+| --- | --- |
+| `RELA_MEM_PG_HOST` / `RELA_MEM_PG_PORT` | `postgres.host` / `postgres.port` |
+| `RELA_MEM_PG_DATABASE` / `RELA_MEM_PG_USER` | `postgres.database` / `postgres.user` |
+| `RELA_MEM_PG_SCHEMA` | `postgres.schema` |
+| `RELA_MEM_FALKORDB_HOST` / `RELA_MEM_FALKORDB_PORT` | `falkordb.host` / `falkordb.port` |
+| `RELA_MEM_FALKORDB_GRAPH` | `falkordb.graph` |
+
+显式设置为空的连接变量会校验失败，不回退到文件；端口由现有 Pydantic 模型转换为整数并检查 `1..65535`，错误显示不包含输入值。Python 调用 `load_settings(path, environ=mapping)` 时只读取该映射，不合并进程环境，也不加载 `.env`。身份、图后端实现与其他业务配置仍由应用自身管理。
+
+Agent 独立支持 `ICARUS_MEM0_ENDPOINT`、`ICARUS_OPENKB_ENDPOINT`、`ICARUS_RELATIONSHIP_ENDPOINT`，仅覆盖对应插件的 `endpoint`，不会改写业务字段或将插件加入启用列表；非 loopback 的知识/关系服务仍须遵循既有 HTTPS 与鉴权规则。
 
 ```bash
-apps/rela-mem/.venv/bin/python apps/rela-mem/scripts/manage.py check-config
-apps/rela-mem/.venv/bin/python apps/rela-mem/scripts/manage.py serve
-# 或在 apps/rela-mem 下
-.venv/bin/uvicorn main:app --app-dir src
+apps/rela-mem/.venv/bin/python apps/rela-mem/scripts/manage.py check-config --config /absolute/path/to/settings.json
+apps/rela-mem/.venv/bin/python apps/rela-mem/scripts/manage.py serve --config /absolute/path/to/settings.json
+# 或设置 RELA_MEM_CONFIG 后在 apps/rela-mem 下运行
+.venv/bin/uvicorn main:app --app-dir src --host 127.0.0.1 --port 8767
 ```
 
 `src` 直接是 import root，测试镜像相同层级，没有 `src/rela_mem` 包层。每个应用使用独立环境以避免 `config` 等通用模块名相互冲突。
@@ -108,4 +161,6 @@ apps/rela-mem/.venv/bin/python apps/rela-mem/scripts/smoke_rest.py --url http://
 apps/rela-mem/.venv/bin/python apps/rela-mem/scripts/seed_demo.py --url http://127.0.0.1:8767 --allow-write
 ```
 
-本期没有 Agent 插件、Argus 接入、WebUI、统一生命周期注册或镜像发布。
+Agent relationship 插件已通过 HTTP 接入；根统一生命周期也已登记 rela-mem。
+本应用仍不导入 Agent，不提供 Argus/WebUI 集成，不负责镜像发布。
+关系插件与存储的共同边界见 [跨应用约定](../../spec/2026-10-19-agent-relationship-integration.md)。
