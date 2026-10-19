@@ -122,6 +122,91 @@ def test_config_model拒绝非法agent_step和context_window():
         )
 
 
+def endpoint_settings():
+    return {
+        "openai_base_url": "https://model.example.invalid/v1",
+        "anthropic_base_url": "https://model.example.invalid",
+        "model_settings": [{"name": "m", "model_name": "m", "context_window": 1000,
+                            "max_tokens": 100, "temperature": 0, "default_think_level": "low"}],
+        "model_roles": {"agent": "m", "compaction": "m", "skill_generation": "m", "title": "m"},
+        "agent": {"max_steps": 17},
+        "skill": {"allow_produce": True},
+    }
+
+
+@pytest.fixture
+def endpoint_environment(monkeypatch):
+    for name in ("ICARUS_MEM0_ENDPOINT", "ICARUS_OPENKB_ENDPOINT", "ICARUS_RELATIONSHIP_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_endpoint_environment_overrides_only_plugin_connections(tmp_path, endpoint_environment):
+    settings = endpoint_settings() | {"runtime": {
+        "required_plugin_ids": ["agent"],
+        "plugin_config": {
+            "memory": {"endpoint": "http://127.0.0.1:8888", "user_id": "u", "agent_id": "a"},
+            "knowledge": {"endpoint": "http://127.0.0.1:7566", "knowledge_base": "notes"},
+            "relationship": {"endpoint": "http://127.0.0.1:8767", "timeout_seconds": 23},
+            "other": {"keep": True},
+        },
+    }}
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    endpoint_environment.setenv("ICARUS_MEM0_ENDPOINT", "https://mem0.example.invalid")
+    endpoint_environment.setenv("ICARUS_OPENKB_ENDPOINT", "https://openkb.example.invalid")
+    endpoint_environment.setenv("ICARUS_RELATIONSHIP_ENDPOINT", "https://relationship.example.invalid")
+
+    config = get_config(path)
+
+    assert config.runtime.plugin_config == {
+        "memory": {"endpoint": "https://mem0.example.invalid", "user_id": "u", "agent_id": "a"},
+        "knowledge": {"endpoint": "https://openkb.example.invalid", "knowledge_base": "notes"},
+        "relationship": {"endpoint": "https://relationship.example.invalid", "timeout_seconds": 23},
+        "other": {"keep": True},
+    }
+    assert config.runtime.required_plugin_ids == ["agent"]
+    assert config.model_roles.model_dump() == {
+        "agent": "m", "compaction": "m", "skill_generation": "m", "title": "m",
+    }
+    assert config.model_settings[0].model_name == "m"
+    assert config.agent.max_steps == 17
+    assert config.skill.allow_produce is True
+    assert json.loads(path.read_text(encoding="utf-8")) == settings
+
+
+@pytest.mark.parametrize("runtime", [None, {}, {"plugin_config": {}}])
+def test_endpoint_environment_creates_only_requested_plugin_slot(tmp_path, endpoint_environment, runtime):
+    settings = endpoint_settings()
+    if runtime is not None:
+        settings["runtime"] = runtime
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    endpoint_environment.setenv("ICARUS_RELATIONSHIP_ENDPOINT", "https://relationship.example.invalid")
+
+    config = get_config(path)
+
+    assert config.runtime.plugin_config == {
+        "relationship": {"endpoint": "https://relationship.example.invalid"},
+    }
+    assert "relationship" not in config.runtime.required_plugin_ids
+
+
+@pytest.mark.parametrize("runtime, expected", [
+    (None, {}),
+    ({"plugin_config": {"memory": {"endpoint": "http://127.0.0.1:9999", "user_id": "u"}}},
+     {"memory": {"endpoint": "http://127.0.0.1:9999", "user_id": "u"}}),
+])
+def test_endpoint_environment_unset_preserves_file(tmp_path, endpoint_environment, runtime, expected):
+    settings = endpoint_settings()
+    if runtime is not None:
+        settings["runtime"] = runtime
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+    assert get_config(path).runtime.plugin_config == expected
+
+
 @pytest.mark.parametrize("field", ["allow_produce", "allow_evolve"])
 @pytest.mark.parametrize("value", [0, 1, "true", None])
 def test_config_model_skill_permissions_are_strict_booleans(field, value):

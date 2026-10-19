@@ -64,6 +64,9 @@ from icarus.core.models.messages import (
 )
 
 
+from collections.abc import Callable
+from agent_app.contracts.prompt import PromptError, PromptReadRequest, PromptReadResponse
+
 class BlackboardPlugin(BasePlugin):
     config_schema = PluginConfig
     provided_capabilities = (ConversationRead,)
@@ -83,9 +86,19 @@ class BlackboardPlugin(BasePlugin):
         history_compactor: HistoryCompactor | None = None,
         region_registry: RegionRegistry | None = None,
         region_store: RegionStore | None = None,
+        fatal_context_sources: set[str] | frozenset[str] = frozenset(),
+        prompt_provider_enabled: bool = False,
+        validate_prompt_context: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(plugin_id)
         self.required_context_sources = frozenset(required_context_sources)
+        self.fatal_context_sources = frozenset(fatal_context_sources)
+        if not self.fatal_context_sources <= self.required_context_sources:
+            raise ValueError("Fatal context sources must also be awaited")
+        self.prompt_provider_enabled = prompt_provider_enabled
+        self.validate_prompt_context = validate_prompt_context
+        self._prompt_refresh_needed = False
+        self._prompt_loaded = False
         self.agent_plugin_id = agent_plugin_id
         self.model_role = model_role
         self.system_prompt = system_prompt
@@ -265,6 +278,10 @@ class BlackboardPlugin(BasePlugin):
                 and source_plugin_id not in state.reported_context_errors
             ):
                 state.reported_context_errors.add(source_plugin_id)
+                if source_plugin_id in self.fatal_context_sources:
+                    await self._fail_before_agent(state, code="prompt_source_failed",
+                                                  error_type="PromptError", message="A required prompt source failed")
+                    return
                 await self.publish(
                     TaskErrorEvent(
                         task_id=task_id,
@@ -385,6 +402,7 @@ class BlackboardPlugin(BasePlugin):
             self._messages = [summary]
             self._context_tokens = usage.output_tokens
             history_messages = [summary]
+            self._prompt_refresh_needed = True
             await self.publish(
                 BlackboardCompactedEvent(
                     task_id=state.task_id,
@@ -392,6 +410,22 @@ class BlackboardPlugin(BasePlugin):
                     after_tokens=usage.output_tokens,
                 )
             )
+
+        if self.prompt_provider_enabled:
+            try:
+                if self._prompt_refresh_needed or not self._prompt_loaded:
+                    response = await self.request(PromptReadRequest(task_id=state.task_id,
+                        reason="refresh" if self._prompt_refresh_needed else "start"))
+                    response.unwrap()
+                    if not isinstance(response, PromptReadResponse):
+                        raise PromptError("prompt_invalid", "Unexpected system prompt response")
+                    self.system_prompt = response.system_prompt
+                    self._prompt_loaded = True
+                    self._prompt_refresh_needed = False
+            except Exception:
+                await self._fail_before_agent(state, code="prompt_source_failed", error_type="PromptError",
+                                              message="System prompt could not be prepared")
+                return
 
         context_blocks = [
             block
@@ -404,6 +438,13 @@ class BlackboardPlugin(BasePlugin):
             for source_plugin_id, contribution in state.contributions.items()
             if contribution.status == "failed"
         }
+        if self.validate_prompt_context is not None:
+            try:
+                content = "\n\n".join(block.content for block in context_blocks if block.source_plugin_id == "prompt")
+                self.validate_prompt_context(self.system_prompt, content)
+            except PromptError as error:
+                await self._fail_before_agent(state, code=error.code, error_type="PromptError", message=str(error))
+                return
         input_prompt = self.prompt_composer.compose(
             prompt=user_input.prompt,
             context_blocks=context_blocks,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import SESSION_INSTRUCTIONS_TYPE
 from agent_app.application.errors import SessionNotFoundError, SessionAlreadyExistsError, ConversationHistoryCorruptError
 
 from dataclasses import dataclass, replace
@@ -12,7 +13,7 @@ from typing import Literal, cast, get_args
 from sqlalchemy import exists, func, select, update as update_row
 from icarus.runtime.storage import SqliteDatabase
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from icarus.core.identity import (
@@ -102,7 +103,7 @@ class SessionStore:
         self._started = False
         self._closed = True
 
-    async def create_session(self, identity: SessionIdentity) -> None:
+    async def create_session(self, identity: SessionIdentity, *, instructions: str | None = None) -> None:
         sessions = self._require_started()
         now = datetime.now(UTC)
         try:
@@ -142,8 +143,37 @@ class SessionStore:
                         delete_reason=None,
                     )
                 )
+                if instructions is not None:
+                    await db.flush()
+                    db.add(_ConversationUpdateRow(
+                        workspace_key=identity.workspace_key,
+                        session_id=identity.session_id,
+                        sequence=0,
+                        task_id=None,
+                        update_type=SESSION_INSTRUCTIONS_TYPE,
+                        payload={"content": instructions},
+                        occurred_at=now,
+                    ))
         except IntegrityError as error:
-            raise SessionAlreadyExistsError(identity.session_id) from error
+            raise SessionAlreadyExistsError(identity.session_id) from None
+        except SQLAlchemyError:
+            # SQL exceptions may contain bound private instruction text.
+            raise RuntimeError("Session initialization could not be stored") from None
+
+    async def get_session_instructions(self, identity: SessionIdentity) -> str | None:
+        sessions = self._require_started()
+        async with sessions() as db:
+            session = await db.get(_SessionRow, (identity.workspace_key, identity.session_id))
+            if session is None or session.deleted_at is not None:
+                raise SessionNotFoundError(identity.session_id)
+            row = await db.get(_ConversationUpdateRow, (identity.workspace_key, identity.session_id, 0))
+            if row is None:
+                return None
+            if (row.update_type != SESSION_INSTRUCTIONS_TYPE or row.task_id is not None
+                    or not isinstance(row.payload, dict) or set(row.payload) != {"content"}
+                    or not isinstance(row.payload["content"], str)):
+                raise ConversationHistoryCorruptError("Session instructions contain an invalid record")
+            return row.payload["content"]
 
     async def get_session(
         self,
@@ -254,6 +284,8 @@ class SessionStore:
     async def append_update(
         self, identity: SessionIdentity, update: RuntimeUpdate
     ) -> RuntimeUpdate:
+        if update.type == SESSION_INSTRUCTIONS_TYPE:
+            raise ValueError("Session instructions cannot be appended as public updates")
         if (update.workspace_key, update.session_id) != (
             identity.workspace_key,
             identity.session_id,
@@ -340,6 +372,7 @@ class SessionStore:
                             == identity.workspace_key,
                             _ConversationUpdateRow.session_id
                             == identity.session_id,
+                            _ConversationUpdateRow.sequence > 0,
                         )
                     )
                 ).one()

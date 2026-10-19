@@ -85,21 +85,24 @@ class SkillScanner:
         )
 
     def _parse(self, skill_file: Path, scope: SkillScope) -> SkillDefinition:
-        text = skill_file.read_text(encoding="utf-8")
-        if not text.startswith("---"):
-            raise ValueError("missing YAML front matter")
-        lines = text.splitlines()
-        if not lines or lines[0].strip() != "---":
-            raise ValueError("invalid YAML front matter opening")
-        try:
-            closing_index = next(
-                index
-                for index, line in enumerate(lines[1:], start=1)
-                if line.strip() == "---"
-            )
-        except StopIteration as error:
-            raise ValueError("missing YAML front matter closing") from error
-        metadata = yaml.safe_load("\n".join(lines[1:closing_index]))
+        remaining = 16 * 1024
+        metadata_lines = []
+        with skill_file.open("rb") as stream:
+            opening = stream.readline(remaining + 1)
+            remaining -= len(opening)
+            if remaining < 0 or opening.strip() != b"---":
+                raise ValueError("invalid YAML front matter opening")
+            while remaining > 0:
+                line = stream.readline(remaining + 1)
+                remaining -= len(line)
+                if not line or remaining < 0:
+                    raise ValueError("missing or oversized YAML front matter")
+                if line.strip() == b"---":
+                    break
+                metadata_lines.append(line.decode("utf-8"))
+            else:
+                raise ValueError("oversized YAML front matter")
+        metadata = yaml.safe_load("".join(metadata_lines))
         if not isinstance(metadata, dict):
             raise ValueError("YAML front matter must be a mapping")
         name = metadata.get("name")

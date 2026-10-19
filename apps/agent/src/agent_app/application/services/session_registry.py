@@ -15,13 +15,14 @@ from agent_app.application.services.common import _key, _max_datetime, _safe_err
 
 
 class SessionRegistry:
-    def __init__(self, *, clock, config_loader, entries, entries_lock, handle_update, publish_lifecycle, session_factory, logger):
+    def __init__(self, *, clock, config_loader, entries, entries_lock, handle_update, publish_lifecycle, load_instructions, session_factory, logger):
         self._clock = clock
         self._config_loader = config_loader
         self._entries = entries
         self._entries_lock = entries_lock
         self._handle_update = handle_update
         self._publish_lifecycle = publish_lifecycle
+        self._load_instructions = load_instructions
         self._session_factory = session_factory
         self.logger = logger
 
@@ -51,10 +52,12 @@ class SessionRegistry:
         runtime: SessionRuntime | None = None
         try:
             config = self._config_loader()
+            instructions = await self._load_instructions(entry.identity)
             runtime = self._session_factory(
                 entry.identity,
                 config=config,
                 publish_update=self._handle_update,
+                instructions=instructions,
                 logger=self.logger.getChild(entry.identity.session_id),
             )
             assert runtime is not None

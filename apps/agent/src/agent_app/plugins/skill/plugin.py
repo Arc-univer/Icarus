@@ -1,6 +1,8 @@
 """Agent-visible Skill management Plugin."""
 
 
+from agent_app.contracts.prompt import PromptSection
+from agent_app.plugins.skill.prompts import discovery_guidance
 from agent_app.plugins.skill.config import PluginConfig
 from icarus.core.capabilities import ConversationReadRequest, ConversationReadResponse
 from icarus.core.plugin import handles
@@ -91,6 +93,10 @@ class SkillPlugin(BasePlugin):
         return source_plugin_id == self.agent_plugin_id and isinstance(
             event, TaskContextInputResultEvent
         )
+
+    def static_prompt_sections(self):
+        return (PromptSection("skill-discovery", "session",
+            discovery_guidance(self.catalog.list_skills(), allow_produce=self.allow_produce, allow_evolve=self.allow_evolve)),)
 
     @handles(TaskContextInputResultEvent)
     async def on_event(self, source_plugin_id: str, event: Event) -> None:

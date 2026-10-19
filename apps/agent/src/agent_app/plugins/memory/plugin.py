@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import PromptSection
+from agent_app.plugins.memory.prompts import MEMORY_GUIDANCE
 from agent_app.plugins.memory.config import PluginConfig
 from icarus.core.plugin import handles
 from icarus.core.contracts.input import UserInputEvent
@@ -95,14 +97,8 @@ class MemoryPlugin(BasePlugin):
         ] = OrderedDict()
         self._result_lock = RLock()
 
-    def accepts_event(self, source_plugin_id: str, event: Event) -> bool:
-        return (
-            source_plugin_id == "user-input"
-            and isinstance(event, UserInputEvent)
-        ) or (
-            source_plugin_id == "agent"
-            and isinstance(event, TaskContextInputResultEvent)
-        )
+    def static_prompt_sections(self):
+        return (PromptSection("memory-use", "session", MEMORY_GUIDANCE),)
 
     @handles(UserInputEvent, TaskContextInputResultEvent)
     async def on_event(self, source_plugin_id: str, event: Event) -> None:

@@ -72,6 +72,7 @@ class RuntimeSettings(pydantic.BaseModel):
     required_plugin_ids: list[str] = pydantic.Field(
         default_factory=lambda: [
             "persistence",
+            "prompt",
             "builtin-tools",
             "agent",
             "user-input",

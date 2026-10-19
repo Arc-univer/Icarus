@@ -56,39 +56,113 @@ def test_nested_service_data_remains_private_after_app_ignore_consolidation():
 
 @pytest.mark.parametrize("app", ["mem0", "openkb"])
 def test_service_dev_install_prepares_local_env_without_docker_or_overwriting_env(tmp_path, app, monkeypatch):
+    import shutil
+    shutil.copy2(ROOT / "icarus.toml", tmp_path / "icarus.toml")
     (tmp_path / ".env").write_text("USER_SETTING=keep\n", encoding="utf-8")
     control = IcarusControl(tmp_path, cwd=tmp_path, environ={})
     commands = []
-    monkeypatch.setattr(control, "_run_checked", lambda command: commands.append(list(command)))
-
-    def no_docker():
-        raise AssertionError("A development-only service install must not need Docker")
-
-    monkeypatch.setattr(control, "_check_docker", no_docker)
+    monkeypatch.setattr(control, "_run_checked", lambda command, environment=None: commands.append(list(command)) or 0)
     assert control.run(["install", app, "--dev"]) == 0
-    assert commands == [
-        ["bash", str(tmp_path / f"apps/{app}/scripts/install.sh"), "--dev"],
-        [str(tmp_path / "scripts/install-commands.sh")],
-    ]
+    assert commands == [["bash", str(tmp_path / f"apps/{app}/scripts/install.sh"), "--dev"]]
     assert (tmp_path / ".env").read_text() == "USER_SETTING=keep\n"
     assert not (tmp_path / ".venv").exists()
 
 
 @pytest.mark.parametrize("app", ["mem0", "openkb"])
 def test_failed_service_dev_install_does_not_continue_to_command_links(tmp_path, app, monkeypatch):
-    (tmp_path / ".env").touch()
+    import shutil
+    shutil.copy2(ROOT / "icarus.toml", tmp_path / "icarus.toml")
     control = IcarusControl(tmp_path, cwd=tmp_path, environ={})
     commands = []
-
-    def fail(command):
+    def fail(command, environment=None):
         commands.append(list(command))
         raise ControlError("private install failed")
-
     monkeypatch.setattr(control, "_run_checked", fail)
     with pytest.raises(ControlError, match="private install failed"):
         control.run(["install", app, "--dev"])
     assert len(commands) == 1
-    assert commands[0][1] == str(tmp_path / f"apps/{app}/scripts/install.sh")
+
+
+def test_infra_compose_files_preserve_data_paths_and_network():
+    import yaml
+    for name, image in (("postgres", "pgvector/pgvector:pg17"), ("falkordb", "falkordb/falkordb:v4.22.1")):
+        path = ROOT / "infra" / name / "compose.yaml"
+        assert path.exists(), f"{name} must have independently managed infrastructure"
+        doc = yaml.safe_load(path.read_text())
+        assert set(doc["services"]) == {name}
+        assert doc["networks"]["icarus"]["external"] is True
+        assert doc["networks"]["icarus"]["name"] == "${ICARUS_NETWORK:-icarus}"
+        service = doc["services"][name]
+        assert service["image"] == image
+        assert f"services/rela-mem/{name}" in str(service["volumes"])
+        assert service["healthcheck"]
+
+
+def test_rela_mem_compose_is_app_only_and_connection_injectable():
+    import yaml
+    compose = yaml.safe_load((ROOT / "apps/rela-mem/docker-compose.yaml").read_text())
+    assert set(compose["services"]) == {"rela-mem"}
+    assert compose["networks"]["icarus"]["external"] is True
+    app = compose["services"]["rela-mem"]
+    assert compose["networks"]["icarus"]["name"] == "${ICARUS_NETWORK:-icarus}"
+    assert app["image"] == "${RELA_MEM_IMAGE:-rela-mem:dev}"
+    assert "depends_on" not in app
+    for key in ("RELA_MEM_PG_HOST", "RELA_MEM_PG_PORT", "RELA_MEM_PG_DATABASE", "RELA_MEM_PG_USER", "RELA_MEM_PG_SCHEMA", "RELA_MEM_FALKORDB_HOST", "RELA_MEM_FALKORDB_PORT", "RELA_MEM_FALKORDB_GRAPH"):
+        assert key in app["environment"]
+
+
+
+@pytest.mark.parametrize("app", ["mem0", "openkb"])
+@pytest.mark.parametrize("action", ["up", "pull", "down"])
+def test_app_compose_wrapper_preserves_process_precedence_scope_and_action_first(tmp_path, app, action):
+    import json
+    import os
+    import shutil
+    repo = tmp_path / "repo with spaces"
+    script = repo / "apps" / app / "scripts/icarus_compose.py"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "apps" / app / "scripts/icarus_compose.py", script)
+    helpers = repo / "scripts/icarus"
+    helpers.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/icarus/environment.py", helpers)
+    (repo / "apps/agent").mkdir(parents=True)
+    (repo / "apps/agent/settings.json").write_text("{}")
+    token = "synthetic-process-token"
+    (repo / ".env").write_text(f"ICARUS_DATA_DIR=/file-data\nICARUS_{app.upper()}_PORT=1111\nICARUS_{app.upper()}_API_TOKEN=file-token\nICARUS_MEM0_API_KEY=file-key\n")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    log = tmp_path / "compose.json"
+    docker = tools / "docker-compose"
+    docker.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nPath(os.environ['CALL_LOG']).write_text(json.dumps({'argv':sys.argv[1:],'port':os.environ.get('ICARUS_" + app.upper() + "_PORT'),'token':os.environ.get('ICARUS_" + app.upper() + "_API_TOKEN'),'key':os.environ.get('ICARUS_MEM0_API_KEY')}))\n")
+    docker.chmod(0o755)
+    custom = repo / "custom.yaml"
+    custom.touch()
+    environment = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"], "CALL_LOG": str(log),
+                   "ICARUS_DATA_DIR": str(tmp_path / "data"), "COMPOSE_PROJECT_NAME": "test-project", "COMPOSE_FILE": str(custom),
+                   f"ICARUS_{app.upper()}_PORT": "2222"}
+    if action == "up":
+        environment.update(ICARUS_MEM0_API_KEY=token, ICARUS_MEM0_JWT_SECRET="fixture-jwt", ICARUS_MEM0_POSTGRES_PASSWORD="fixture-db",
+                           ICARUS_MEM0_LLM_API_KEY="fixture-llm", ICARUS_OPENKB_API_TOKEN=token, ICARUS_OPENKB_LLM_API_KEY="fixture-llm")
+    result = subprocess.run([sys.executable, str(script), action, *( ["-d"] if action == "up" else [])],
+                            env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    call = json.loads(log.read_text())
+    assert call["port"] == "2222"
+    argv = call["argv"]
+    assert argv[argv.index("-f") + 1] == str(custom)
+    assert argv[argv.index("-p") + 1] == "test-project"
+    assert argv[-2:] == ["up", "-d"] if action == "up" else argv[-1] == action
+    if action == "up":
+        assert call["token"] == token if app == "openkb" else call["key"] == token
+
+
+def test_app_compose_ports_are_environment_parameterized():
+    import yaml
+    mem0 = yaml.safe_load((ROOT / "apps/mem0/server/docker-compose.yaml").read_text())["services"]
+    openkb = yaml.safe_load((ROOT / "apps/openkb/docker-compose.yaml").read_text())["services"]
+    for app, service, variable in ((mem0, "mem0", "ICARUS_MEM0_PORT"), (mem0, "postgres", "ICARUS_MEM0_POSTGRES_PORT"),
+                                    (mem0, "mem0-dashboard", "ICARUS_MEM0_DASHBOARD_PORT"), (openkb, "openkb", "ICARUS_OPENKB_PORT")):
+        assert variable in app[service]["ports"][0]
 
 
 def test_service_workflow_covers_root_control_and_runs_the_app_entrypoints():

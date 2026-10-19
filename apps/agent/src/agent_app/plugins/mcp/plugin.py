@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import PromptSection
+from agent_app.plugins.mcp.prompts import MCP_GUIDANCE
 from agent_app.plugins.mcp.config import PluginConfig
 
 import asyncio
@@ -36,6 +38,11 @@ class MCPPlugin(BasePlugin):
         self.result_converter = result_converter or MCPResultConverter()
         self.redactor = redactor or Redactor()
         self._accepting = False
+
+    def static_prompt_sections(self):
+        if not self.manager.server_names:
+            return ()
+        return (PromptSection("mcp-use", "session", MCP_GUIDANCE),)
 
     async def start(self) -> None:
         self._accepting = True

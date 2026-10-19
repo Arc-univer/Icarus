@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import PromptSection
+from agent_app.plugins.process.prompts import PROCESS_GUIDANCE
 from agent_app.plugins.process.config import PluginConfig
 
 import asyncio
@@ -58,6 +60,9 @@ class ProcessPlugin(BasePlugin):
             ),
             publish_snapshot=self._publish_snapshot,
         )
+
+    def static_prompt_sections(self):
+        return (PromptSection("process-use", "session", PROCESS_GUIDANCE),)
 
     async def start(self) -> None:
         with self._lifecycle_lock:

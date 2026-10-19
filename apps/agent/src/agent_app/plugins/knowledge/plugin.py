@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_app.contracts.prompt import PromptSection
+from agent_app.plugins.knowledge.prompts import KNOWLEDGE_GUIDANCE
 from agent_app.plugins.knowledge.config import PluginConfig
 
 from contextlib import ExitStack
@@ -70,6 +72,9 @@ class KnowledgePlugin(BasePlugin):
     def accepts_event(self, source_plugin_id: str, event: Event) -> bool:
         del source_plugin_id, event
         return False
+
+    def static_prompt_sections(self):
+        return (PromptSection("knowledge-use", "session", KNOWLEDGE_GUIDANCE),)
 
 
     async def stop(self) -> None:

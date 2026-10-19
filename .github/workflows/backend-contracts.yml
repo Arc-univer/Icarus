@@ -44,7 +44,7 @@ jobs:
           apps/agent/test/agent_app/plugins/memory/test_plugin.py
           apps/agent/test/agent_app/plugins/memory/test_adapter.py
           apps/agent/test/agent_app/plugins/memory/test_tools.py
-          apps/agent/test/agent_app/tools/builtin/test_builtin_tools.py
+          apps/agent/test/agent_app/plugins/builtin_tools/test_tools.py
           apps/agent/test/agent_app/application/test_memory_context.py
           apps/agent/test/agent_app/application/test_agent_runtime.py
           -q --junitxml=test-results/agent.xml

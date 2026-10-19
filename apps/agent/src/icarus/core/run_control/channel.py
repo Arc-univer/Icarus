@@ -246,7 +246,7 @@ class TaskChannel:
             return None
         records = tuple(self._context_records)
         self._context_records.clear()
-        formatted = _format_records(records)
+        formatted = format_runtime_context(records)
         content: list[ContentPart] = [TextPart(formatted)] if formatted else []
         content.extend(
             image for record in records for image in record.input_images
@@ -309,7 +309,7 @@ class TaskChannel:
         )
 
 
-def _format_records(records: tuple[RuntimeContextRecord, ...]) -> str:
+def format_runtime_context(records: tuple[RuntimeContextRecord, ...]) -> str:
     sections = []
     for kind, tag in (
         ("context", "runtime_context"),

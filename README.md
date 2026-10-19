@@ -9,8 +9,8 @@ Icarus 希望通过长期共处逐渐理解用户、用户正在经历的事情�
 
 项目当前提供本地 TUI 与单用户 WebUI。TUI 支持文本和图片输入；WebUI 提供记忆管理、知识库和
 Agent 文本对话，可创建和恢复 Session、查看工具执行，并在刷新后恢复历史。长期 Memory 的
-Agent 侧能力已经接入，使用时需要另行启动仓库内的自建 Mem0 与 OpenKB；持续环境感知、多端产品
-和更完整的自主成长仍属于后续方向。
+Agent 侧能力已经接入，人物档案与关系由独立 rela-mem 服务提供；根控制面统一管理本地组件或连接已有
+远程服务。持续环境感知、多端产品和更完整的自主成长仍属于后续方向。
 
 ## 产品方向
 
@@ -37,7 +37,11 @@ apps/
 │   └── scripts/
 ├── mem0/        Apache-2.0 Mem0 源码与 Icarus 自建服务修改
 ├── openkb/      Apache-2.0 OpenKB 源码与 Icarus 自建服务修改
+├── rela-mem/    独立人物身份、档案和关系服务（不运行 LLM）
 └── webui/       记忆、知识库、对话工作台及 Node 同源代理入口
+icarus.toml      公开组件拓扑、依赖、命令和环境变量绑定
+icarus.local.toml.example  本机覆盖示例（复制后的 .local.toml 不提交）
+infra/           独立 PostgreSQL / FalkorDB Compose 定义
 packages/        应用间共享的数据模型和环境配置
 docs/            项目定位、路线图、仓库基建 spec 与 SDD 模板
 .agents/skills/  开发期技能参考（不自动运行）
@@ -54,7 +58,8 @@ Makefile         根目录统一命令入口
 不可拆分的跨应用需求使用根目录 `spec/YYYY-MM-DD-<feature>.md`。
 完整产品定位见 [`docs/product-positioning.md`](docs/product-positioning.md)。
 Python App 使用自己的 `.venv` 和 requirements；WebUI 使用应用目录内的 pnpm workspace。
-根目录不集中安装某一种语言的依赖，只调用各 App 提供的脚本。
+根控制面仅使用 Python 3.11+ 标准库，不集中安装某一种语言的依赖；应用依赖和镜像构建仍归各 App，
+独立中间件定义归 `infra/`。当前原生进程管理依赖 Linux `/proc` 身份与监听端口校验，不声明 macOS/Windows 原生管理兼容。
 
 ## 技术特色
 
@@ -113,124 +118,123 @@ Event 用于业务通信，Blackboard 持有模型工作历史和上下文状态
 
 ## 快速开始
 
-首次从源码安装 Python App 和后端服务的运行依赖（WebUI 单独使用下文的 pnpm 命令）：
+### 1. 配置拓扑与业务设置
+
+在仓库根执行；需要 Python 3.11+、各应用自己的运行依赖，以及本地 Compose 组件所需的 Docker Compose。
+WebUI 安装需要 Node.js 22.12+ 和应用锁定的 pnpm（可由 Corepack 提供）。
 
 ```bash
-./bin/icarus install
+cp -n .example.env .env
+./bin/icarus config validate
+./bin/icarus config show
+./bin/icarus config show rela-mem
 ```
 
-如果根 `.env` 不存在，安装命令会从 `.example.env` 创建一个权限受限的空模板；安装完成后需要填写
-运行所需配置。安装不会覆盖已有 `.env`，也不会启动任何服务。
+`config validate/show` 是只读配置入口，不启动服务、不调用 Docker、不读取或解析 Secret 值；目前没有图形配置 UI。
+`show` 输出有效注册元数据和来源文件。未创建本地覆盖时使用默认全本地部署。
+如已有 `icarus.local.toml`，先检查它是否已把组件切成 remote。
 
-安装完成后会在 `${ICARUS_BIN_DIR:-~/.local/bin}` 创建 `icarus` 和 `icarus-gateway` 软链接。需要使用
-其他命令目录时可以执行：
+| 配置 | 所有权 |
+| --- | --- |
+| `icarus.toml` | 公开拓扑、组件命令、依赖、端口与环境变量名 |
+| `icarus.local.toml`（不提交） | 本机 local/remote、地址与部署方式覆盖 |
+| `.env` 或进程环境（不提交） | Secret、绝对 `ICARUS_DATA_DIR` 及应用所需环境设置 |
+| `apps/agent/settings.json`、rela-mem 身份 JSON | 模型、Plugin、用户/Agent 身份等业务配置 |
+
+填写 `.example.env` 中当前协议所需的模型 Key、Mem0/OpenKB 凭据，以及本地关系服务使用的
+`RELA_MEM_API_TOKEN`、`RELA_MEM_PG_PASSWORD`、`RELA_MEM_FALKORDB_PASSWORD`；不要将凭据写入 TOML。
+rela-mem 部署前复制并调整其 `settings.example.json` 中的身份，使用 `RELA_MEM_SETTINGS_FILE` 指向独立文件，
+不要把示例身份当作自己的部署身份。完整说明见 [rela-mem README](apps/rela-mem/README.md)。
+
+已有远程数据库时，才复制覆盖示例并修改地址：
 
 ```bash
-ICARUS_BIN_DIR=/your/bin ./bin/icarus install
+cp -n icarus.local.toml.example icarus.local.toml
 ```
 
-需要运行测试时，安装各 App 的开发依赖：
+`icarus.local.toml` 的示例片段如下（本机隧道示例，不代表自动建立隧道；Compose 消费方须改为容器可达地址）：
+
+```toml
+[components.postgres]
+mode = "remote"
+host = "localhost"
+port = 25432
+
+[components.falkordb]
+mode = "remote"
+host = "localhost"
+port = 26379
+```
+
+若整个应用已经部署，改为覆盖其 `mode` 与 `endpoint`，例如：
+
+```toml
+[components.rela-mem]
+mode = "remote"
+endpoint = "https://relationship.example.invalid"
+```
+
+remote 组件只探测，不在远端安装、启动或停止，也不递归启动它内部的本地数据库。remote 数据库的角色、
+数据库和权限须预先配置；TCP `reachable` 不等于认证成功。容器不能通过自己的 loopback 访问宿主机隧道，
+Compose 消费方必须使用容器可达的地址；不要把无 TLS 数据库开放到公网。
+
+拓扑优先级为本次 CLI 覆盖 > 旁侧 local TOML > base TOML > 默认值。`--config PATH` 可在动词前后使用一次，
+读取其旁侧 `<stem>.local.toml`；运维相对路径仍以仓库根解析。环境先合并 `.env` 与进程（进程优先），
+再由声明的拓扑导出覆盖连接变量，冲突告警仅列变量名。`ICARUS_ENV_FILE` 可为控制面选择替代 dotenv。
+应用不读取根 TOML；Agent 的三种插件端点和 rela-mem 的数据库字段通过环境覆盖，业务配置不被改写。
+
+`ICARUS_DATA_DIR` 保存 `icarus.db`、Plugin State、Trace、图片 Asset 和服务数据。
+本版本不迁移旧 JSONL Session 数据；首次使用需配置不包含旧 Session 目录的新数据目录。
+
+### 2. 安装不等于启动
 
 ```bash
-icarus install --dev
+./bin/icarus install              # 默认集合：原生依赖 + 应用镜像构建 + 中间件镜像拉取
+./bin/icarus install gateway      # 包含 embedded Agent 及其 required 依赖
+./bin/icarus install rela-mem     # 构建应用镜像，拉取 required 本地数据库镜像
+./bin/icarus install --dev        # 应用自己的开发/测试环境，不构建服务镜像
 ```
 
-也可以只安装一个 App：
+安装不启动服务、不创建 `.env`，也不自动安装全局命令链接。Agent、Gateway、TUI 的 `.venv` 分别归应用；
+Mem0/OpenKB/rela-mem 的运行依赖在各自镜像内。需要独立 rela-mem Python 环境时使用其
+`scripts/install.sh`。可选执行 `bash scripts/install-commands.sh`，将 `icarus` / `icarus-gateway`
+链接到 `${ICARUS_BIN_DIR:-~/.local/bin}` 后，才可在任意目录使用短命令。Makefile 保留为开发快捷入口。
+
+### 3. 启停与诊断
+
+**从旧 rela-mem 三合一 Compose 切换前，必须先手动停止旧项目。** 新旧项目不能同时挂载相同数据库目录；
+控制面没有挂载碰撞自动保护，不迁移、不清空数据。原生进程的受管启停当前仅支持具有可读 `/proc` 的 Linux。
 
 ```bash
-icarus install agent
-icarus install gateway
-icarus install tui
+./bin/icarus start                # 默认后台集合就绪后，最后打开 TUI
+./bin/icarus start gateway        # 自动满足 Agent 的 required Mem0/OpenKB 依赖
+./bin/icarus start rela-mem       # 自动启动 required 本地 postgres/falkordb，或探测 remote
+./bin/icarus start webui          # 原生生产服务；上游是 optional，不隐式启动上游
+./bin/icarus status
+./bin/icarus logs rela-mem --no-follow
+./bin/icarus logs gateway         # 默认持续跟随
+./bin/icarus stop rela-mem        # 只停止应用，保留共享数据库
+./bin/icarus stop                 # 默认 required 闭包逆序停止、owner 去重，保留持久数据
 ```
 
-上述命令分别创建：
+默认集合包含 Gateway、进程内 Agent、Mem0、OpenKB、rela-mem、WebUI 和前台 TUI；独立 PostgreSQL/FalkorDB
+由 rela-mem 的 required 边加入。Mem0 仍整体管理 API、私有 PostgreSQL 与 Dashboard。Argus 不登记。
+`agent` 没有独立进程，显式启停请操作 `gateway`。重复 start 复用就绪实例；配置改变需明确 stop/start。
+required 不可达阻止依赖分支，optional 只警告/降级；无关分支继续。未知端口服务不会被接管或停止。
 
-```text
-apps/agent/.venv
-apps/gateway/.venv
-apps/tui/.venv
-```
-
-依赖始终属于各自 App；仓库根目录不会创建共享 `.venv`。Mem0 和 OpenKB 的服务端依赖通过
-`icarus install mem0` 与 `icarus install openkb` 构建到各自 Docker 镜像中。`make install`、
-`make install-dev` 和 `make install APP=<name>` 保留为开发兼容入口。
-
-从根目录示例创建 `.env`，配置模型 API Key、外部服务 Secret 和绝对数据目录，并在
-`apps/agent/settings.json` 中选择模型：
-
-```dotenv
-OPENAI_API_KEY=your-api-key
-ANTHROPIC_API_KEY=your-api-key
-ICARUS_DATA_DIR=/Users/you/.icarus
-ICARUS_MEM0_API_KEY=your-local-service-key
-ICARUS_MEM0_POSTGRES_PASSWORD=your-database-password
-ICARUS_MEM0_JWT_SECRET=your-jwt-secret
-ICARUS_MEM0_LLM_API_KEY=your-memory-model-key
-ICARUS_MEM0_AUTH_DISABLED=false
-ICARUS_OPENKB_API_TOKEN=your-local-service-token
-ICARUS_OPENKB_LLM_API_KEY=your-knowledge-model-key
-```
-
-只需填写当前协议实际使用的 API Key。`ICARUS_DATA_DIR` 用于保存 `icarus.db`、Plugin State、Trace
-和图片 Asset。Agent、Gateway、TUI、Mem0 和 OpenKB 都读取仓库根 `.env`。本版本不迁移旧 JSONL Session 数据；首次
-使用需要配置不包含旧 Session 目录的新数据目录。
-
-启动后端服务并打开 TUI：
-
-```bash
-icarus start
-```
-
-该命令按 Mem0、OpenKB、Gateway 的顺序启动后台项目并等待健康检查，随后在当前终端打开 TUI。
-TUI 退出后后台项目继续运行。使用统一状态和停止命令管理它们：
-
-```bash
-icarus status
-icarus stop
-```
-
-也可以单独管理一个项目：
-
-```bash
-icarus start mem0
-icarus start openkb
-icarus start gateway
-
-icarus stop mem0
-icarus stop openkb
-icarus stop gateway
-icarus stop tui
-
-icarus status mem0
-```
-
-`agent` 是 Gateway 进程内加载的能力，不是独立进程，因此随 Gateway 启停。Mem0 作为一个项目管理
-其 API、PostgreSQL 和 Dashboard 服务组。停止命令不会删除 `$ICARUS_DATA_DIR` 下的 Memory、
-Knowledge、Session 或日志数据。
-
-服务已经启动时，可以只打开 TUI：
+TUI 退出不停止后台服务；只打开已有 Gateway 的 TUI 可使用：
 
 ```bash
 cd /path/to/workspace
 icarus tui --session-id my-session
+# 显式地址只跳过默认 Gateway 的检查，不启动依赖
+icarus tui --gateway-url ws://127.0.0.1:8765/rpc --session-id my-session
 ```
 
-`icarus tui` 不会隐式启动 Gateway。Gateway 不可用时会提示使用 `icarus start gateway` 或
-`icarus start`。不传 `--session-id` 时生成一个新 Session ID；建议在需要后续恢复时显式指定 ID。
-无子命令的旧形式暂时兼容：
-
-```bash
-icarus --session-id my-session
-```
-
-统一命令不会改变调用者当前目录；执行 `icarus start` 或 `icarus tui` 时的目录就是 Agent
-Workspace。Makefile 继续作为开发快捷入口：
-
-```bash
-cd /path/to/workspace
-make -f /absolute/path/to/Icarus/Makefile \
-  start ARGS="--session-id my-session"
-```
+`icarus tui` 和旧形式 `icarus --session-id my-session` 不隐式启动 Gateway；未传 ID 时创建新 Session。
+前台 TUI 保留调用者目录作为 Workspace；后台组件按注册的 `workdir` 运行。
+更多状态、安全停止与中间件操作见 [infra 运维说明](infra/README.md) 和
+[控制面架构](docs/spec/2026-10-19-component-lifecycle/arch.md)。
 
 Mem0 要求 Docker Compose，读取仓库根 `.env`，并把 PostgreSQL、history、模型缓存和备份放在
 `$ICARUS_DATA_DIR/services/mem0`。`ICARUS_MEM0_LLM_API_KEY` 为空时复用 `OPENAI_API_KEY`；默认 LLM
@@ -279,20 +283,22 @@ WebSocket RPC: ws://127.0.0.1:8765/rpc
 
 ### 启动 WebUI
 
-先在仓库根目录启动 `mem0`、`openkb` 和 `gateway`，再使用 Node.js 22.12+ 与 pnpm 10.32.1：
+统一入口管理原生生产 WebUI，默认打开 <http://127.0.0.1:8080>：
 
 ```bash
-cd apps/webui
-pnpm install --frozen-lockfile
-pnpm dev
+./bin/icarus install webui         # 安装 workspace 依赖并构建静态页面
+./bin/icarus start gateway        # 对话所需；自动满足 required 服务
+./bin/icarus start webui
+./bin/icarus status webui
 ```
 
-打开 <http://127.0.0.1:5173>。开发代理读取仓库根 `.env` 中的后端地址和凭据。
-对话页填写服务端工作区绝对路径，选择或新建会话。`icarus start` 暂不管理 WebUI 进程。
+WebUI 的 Gateway/Mem0/OpenKB 是 optional 上游，壳与代理可在上游不可用时启动，但业务请求会失败，
+状态显示降级。对话页填写服务端工作区绝对路径，选择或新建会话。
 
-生产部署使用 `pnpm build` 与 `node --env-file=.env.local server/index.mjs`，默认端口 8080；
-`.env.local` 从 WebUI 的 `.env.example` 创建。生产入口支持单用户 Basic 认证、HTTP/WebSocket
-代理，非本机部署需配合 HTTPS。完整步骤见 [WebUI README](apps/webui/README.md) 和
+开发时也可从 `apps/webui` 执行 `corepack pnpm install --frozen-lockfile` 和
+`corepack pnpm --filter @icarus/shell dev`，打开 <http://127.0.0.1:5173>；开发进程不由控制面管理。
+生产入口支持单用户 Basic 认证、HTTP/WebSocket 代理，非本机绑定需要认证，远程访问还需 HTTPS。
+绕过控制面部署与 `.env.local` 的步骤见 [WebUI README](apps/webui/README.md) 和
 [部署说明](apps/webui/docs/deployment.md)。
 
 ## 当前能力
@@ -329,9 +335,10 @@ pnpm dev
 - TUI 未被 Runtime 接受的 Pending Queue 不跨 TUI 进程持久化；
 - WebUI 对话按游标读取历史；TUI 当前仍一次性恢复 Conversation。
 - WebUI 为单用户部署，支持入口认证；独立多用户 Backend、GUI 和 Gateway 远程认证尚未接入。
-- Memory 依赖本机 Mem0；自动召回默认截止时间为 5 秒，可通过
+- Memory 依赖已配置的 Mem0（本地或 remote）；自动召回默认截止时间为 5 秒，可通过
   `runtime.plugin_config.memory.recall.deadline_ms` 配置为 1–30000 毫秒，超时后当前轮降级。
-- Knowledge 依赖本机 OpenKB；服务不可用时当前 Tool 失败，但 Session 保持可用。
+- Knowledge 依赖已配置的 OpenKB；关系工具依赖 rela-mem。服务不可用时相关 Tool 失败，但 Session 保持可用；
+  这与控制面启动时的 required/optional 预检是两个不同边界。
 
 ## 第三方源码
 

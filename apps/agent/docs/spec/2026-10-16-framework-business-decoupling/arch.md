@@ -17,8 +17,8 @@ apps/agent/src/
     ├── application/{controllers,services,repositories,models}/
     ├── config/
     ├── model_provider/
-    ├── plugins/    11个具体插件
-    ├── tools/builtin/
+    ├── contracts/  应用级提示词贡献与读取契约
+    ├── plugins/    12个具体插件
     ├── utils/
     └── resources/
 ```
@@ -28,7 +28,7 @@ ConfigModel或厂商SDK。`icarus`公开BasePlugin/Event/BaseTool/BaseAgent，�
 
 Agent和Gateway**各自的venv**均editable安装同一个本地项目；CI临时环境显式使用with-editable。
 Gateway/TUI仍保留自己的仓库根bootstrap，用于它们与根packages，不再作为Agent导入机制。
-wheel携带11份manifest和default_settings.json，不包含测试、根apps命名空间或.env。
+wheel携带12份manifest和default_settings.json，不包含测试、根apps命名空间或.env。
 
 ## 2. 会话与应用结构
 
@@ -92,7 +92,8 @@ SessionHost拥有每会话唯一TaskChannelRegistry，Agent/UserInput/Host共享
 
 ## 5. 定向能力请求
 
-唯一内置业务请求是`conversation.read`：Skill向Blackboard读取已提交的Message快照，再与当前task_messages拼接。
+内置业务请求有 `conversation.read`（Skill向Blackboard读取已提交Message快照）以及 `prompt.read`
+（Blackboard向Prompt读取静态system快照；compaction后在同task首次模型请求前刷新）。
 请求助手位于core，通过注入函数发送，拥有correlation/Future/超时/来源与响应类型/task校验；
 总线只按不透明地址投递，能力流量不进入普通订阅和链推导。
 
@@ -111,6 +112,7 @@ SessionHost拥有每会话唯一TaskChannelRegistry，Agent/UserInput/Host共享
 | 完整可重放Message | Blackboard跨Run模型工作历史；安全提交、取消闭合、压缩 | plugin-state/blackboard.json |
 | 公共RuntimeUpdate | 客户端展示/断线对账；完整文本/thinking/工具预览/终态 | icarus.db/conversation_updates |
 | Session/标题/软删除 | 应用Repository | 现有SQLite表 |
+| 创建时外部指令 | 应用私有初始化记录；Prompt静态external层 | conversation_updates的保留sequence=0，不占公共序号 |
 | 图片/超大工具结果 | 基座资产与工具设施 | 会话文件/相对引用 |
 | trace/log | 诊断，不参与恢复 | 现会话JSONL/log路径 |
 

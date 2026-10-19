@@ -16,7 +16,7 @@ wheel = next(Path(sys.argv[1]).glob('*.whl'))
 with ZipFile(wheel) as archive:
     names = archive.namelist()
     manifests = [name for name in names if name.startswith('agent_app/plugins/') and name.endswith('/manifest.json')]
-    assert len(manifests) == 11, manifests
+    assert len(manifests) == 13, manifests
     assert 'agent_app/resources/default_settings.json' in names
     assert not any('.env' in Path(name).parts for name in names)
     assert not any(name.startswith(('apps/', 'test/')) for name in names)
@@ -31,7 +31,7 @@ from agent_app.application import AgentRuntime
 from icarus.runtime.discovery import PluginManifestDiscovery
 
 assert files('agent_app.resources').joinpath('default_settings.json').is_file()
-assert len(PluginManifestDiscovery(builtin_package='agent_app.plugins').discover().plugins) == 11
+assert len(PluginManifestDiscovery(builtin_package='agent_app.plugins').discover().plugins) == 13
 assert AgentRuntime is not None
 print('Installed wheel imports and discovery verified')
 PY

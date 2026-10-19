@@ -6,6 +6,10 @@
   "python_requires": [],
   "required_capabilities": [
     {
+      "capability_id": "prompt.read",
+      "version_spec": ">=1,<2"
+    },
+    {
       "capability_id": "state.store",
       "version_spec": ">=1,<2"
     }
@@ -26,6 +30,7 @@
     "task.error"
   ],
   "consumed_events": [
+    "context.contribution",
     "input.user_input",
     "input.finished",
     "context.region_updated",

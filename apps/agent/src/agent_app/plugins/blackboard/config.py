@@ -6,3 +6,4 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_
 class PluginConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     required_context_sources: list[str] = Field(default_factory=list)
+    fatal_context_sources: list[str] = Field(default_factory=list)

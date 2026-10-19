@@ -1,5 +1,6 @@
 """Agent 应用层。"""
 
+from agent_app.contracts.prompt import PromptError
 from agent_app.application.agent_runtime import AgentRuntime
 from agent_app.application.agent_runtime import (
     AgentRuntimeStoppingError,
@@ -33,6 +34,7 @@ from agent_app.application.runtime_update_stream import (
 from icarus.core.runtime_update import RuntimeUpdate
 
 __all__ = [
+    "PromptError",
     "AgentRuntime",
     "AgentRuntimeStoppingError",
     "ConversationHistoryCorruptError",

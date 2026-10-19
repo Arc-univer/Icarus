@@ -3,9 +3,15 @@
 ## Scope and ownership
 
 Icarus is an application-oriented Monorepo. Keep business code, dependency declarations,
-lockfiles, Dockerfiles, Compose definitions, and development environments in the owning
-`apps/<app>/`. The repository root provides the lifecycle and validation control plane,
-not a shared Python distribution or environment.
+lockfiles, Dockerfiles, app-owned Compose definitions, and development environments in the
+owning `apps/<app>/`. The narrow exception is independently managed, repository-owned
+middleware: its Compose definitions live in `infra/<component>/`, while `icarus.toml`
+registers public topology, commands and environment bindings. Mem0's private PostgreSQL
+remains bundled in its app-owned Compose project.
+
+The repository root provides a Python 3.11+ stdlib-only lifecycle and validation control
+plane, not a shared Python distribution, dependency manifest or environment. Applications
+consume connection environment variables; they do not import the controller or read its TOML.
 
 `bin/icarus` delegates to `scripts/icarus/`; Makefile targets are shortcuts to those
 same entry points. AgentRuntime runs inside Gateway; do not introduce a separate Agent
@@ -19,7 +25,7 @@ Do not use repository-root PYTHONPATH as a replacement for installing Agent. Gat
 own existing repository bootstrap for root-owned protocol/environment modules.
 
 `make typecheck-agent` checks both canonical Python packages; `make check-package-agent` builds a wheel,
-checks all 11 manifests and packaged defaults, and installs it into a disposable verification environment.
+checks all 13 manifests and packaged defaults, and installs it into a disposable verification environment.
 Gateway's suite includes a real TCP/WebSocket test with production runtime/plugins/SQLite and deterministic
 local HTTP fixtures for external services; it is not a remote-model smoke.
 
@@ -35,7 +41,8 @@ return their actual exit codes. Optional-provider collection errors are missing
 prerequisites, not passing tests. Compare failures by test identity against the same
 baseline and environment; do not fix unrelated failures or hide them with skip rules.
 
-The root `make test` aggregates application checks. CI calls the same service scripts
+The root `make test` first runs `scripts/tests/` with the existing Agent pytest interpreter,
+then aggregates application checks. No root test environment is installed. CI calls the same service scripts
 rather than defining a second list of test files. Real-service/model smoke tests use
 isolated data and require explicit execution/cost authorization. Never publish credentials
 or use production databases as test fixtures.

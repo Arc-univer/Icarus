@@ -2,6 +2,7 @@
 
 from uuid import uuid4
 
+from agent_app.contracts.prompt import SESSION_INSTRUCTIONS_TYPE
 from icarus.core.runtime_update import RuntimeUpdate
 from icarus.runtime.fanout import BoundedFanout, BoundedMailbox, DEFAULT_QUEUE_CAPACITY, MailboxOverflowError
 
@@ -48,6 +49,8 @@ class RuntimeUpdateStream:
         return RuntimeUpdateSubscription(self, self._fanout.subscribe())
 
     async def publish(self, update: RuntimeUpdate) -> None:
+        if update.type == SESSION_INSTRUCTIONS_TYPE:
+            raise ValueError("Session instructions are private")
         self._fanout.publish(update)
 
     def close(self) -> None:

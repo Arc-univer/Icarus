@@ -102,3 +102,22 @@ def test_scanner_missing_directories_and_invalid_scope(tmp_path):
     assert scanner.scan() == []
     with pytest.raises(ValueError, match="Unsupported Skill scope"):
         scanner.scan_scope("all")
+
+
+def test_scanner_reads_only_bounded_frontmatter_not_body(tmp_path):
+    root = tmp_path / "global"
+    folder = root / "large-body"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(b"---\nname: example\ndescription: metadata only\n---\n" + b"\xff" * 100000)
+    found = SkillScanner(root, tmp_path / "workspace").scan()
+    assert len(found) == 1
+    assert found[0].name == "example"
+    assert found[0].description == "metadata only"
+
+
+def test_scanner_rejects_unbounded_frontmatter(tmp_path):
+    root = tmp_path / "global"
+    folder = root / "oversized"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(b"---\nname: huge\ndescription: " + b"x" * 20000 + b"\n---\n")
+    assert SkillScanner(root, tmp_path / "workspace").scan() == []
