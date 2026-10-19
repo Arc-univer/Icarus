@@ -23,7 +23,7 @@ def main() -> int:
     environment = merged_environment(repo_root, os.environ)
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     passive = action in {
-        "build", "pull", "config", "down", "stop", "logs", "ps", "kill", "rm"
+        "build", "pull", "down", "stop", "logs", "ps", "kill", "rm"
     }
     if passive:
         environment["ICARUS_DATA_DIR"] = environment.get(
