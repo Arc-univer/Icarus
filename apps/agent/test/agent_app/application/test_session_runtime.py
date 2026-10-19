@@ -534,10 +534,13 @@ def test_session_runtime_e2e自动记忆先注入再进入完整历史(tmp_path,
     assert "write a design" in messages[0].content[0].text
     assert messages[1] == Message("assistant", [TextPart("used memory")])
     assert {
-        "memory_recall", "memory_get", "memory_history",
-        "memory_remember", "memory_correct", "memory_stop_reference",
-        "memory_restore_reference", "memory_delete",
+        "memory_recall", "memory_read", "memory_remember",
+        "memory_correct", "memory_set_recall", "memory_delete",
     }.issubset(tools)
+    assert not {
+        "memory_get", "memory_history",
+        "memory_stop_reference", "memory_restore_reference",
+    }.intersection(tools)
 
 
 def test_session_runtime_e2e知识工具按需执行且不注册region(tmp_path, monkeypatch):

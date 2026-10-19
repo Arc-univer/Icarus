@@ -347,7 +347,7 @@ MemoryItem
 └── updated_at: ISO-8601 | null
 ```
 
-`created_at` 和 `updated_at` 同时出现在自动召回 Snapshot 与显式 `memory_recall`、`memory_get` 结果中。`memory_history` 返回每条变更自身的时间。
+`created_at` 和 `updated_at` 同时出现在自动召回 Snapshot、显式 `memory_recall` 与 `memory_read` 的结果中。`memory_read(include_history=true)` 返回的 history 条目各自带变更时间；WebUI 仍通过 mem0 REST `GET /memories/{id}/history` 读取。
 
 这两个字段表示 Mem0 记录的创建和更新时间，不代表事实发生时间，也不能单独决定冲突事实的正确性。事实时间仍属于记忆正文。
 
@@ -434,17 +434,17 @@ MemoryPlugin 注册固定 Tool：
 | Tool | 输入重点 | 后端能力 |
 | --- | --- | --- |
 | `memory_recall` | `query`、可选 `is_workspace`、`include_stopped` 与预算 | `POST /search` |
-| `memory_get` | `ref` | `GET /memories/{id}` |
-| `memory_history` | `ref` | `GET /memories/{id}/history` |
-| `memory_remember` | `content`、`is_workspace` | `POST /memories`, `infer=true` |
+| `memory_read` | `ref`、可选 `include_history`（默认 false） | `GET /memories/{id}`；`include_history=true` 时再读 `/history` |
+| `memory_remember` | `content`、可选 `is_workspace`（默认 false） | `POST /memories`, `infer=true` |
 | `memory_correct` | `ref`、`content` | `PUT /memories/{id}`, update text |
-| `memory_stop_reference` | `ref` | set past `expiration_date` |
-| `memory_restore_reference` | `ref` | set `expiration_date=null` |
+| `memory_set_recall` | `ref`、`enabled` | `enabled=false` 设置过去的 `expiration_date`；`true` 清空 |
 | `memory_delete` | `ref` | `DELETE /memories/{id}` |
 
 主 Agent 根据当前输入、对话上下文和任务结果自行判断是否调用。MemoryPlugin 不增加关键词触发、重要性评分、规则引擎、二次 LLM 审核或后台自动抽取。
 
 主动读取只通过当前 ToolResult 返回，不进入 Memory Region，也不再次注入 TaskChannel。
+
+`memory_read` 提供按 ref 读取当前正文；`include_history=true` 时同时返回变更历史。WebUI 仍通过 mem0 REST 保留 get/history 路径。
 
 `memory_recall.is_workspace` 使用与写入一致的布尔语义：`true` 只查当前 Workspace，`false` 只查 Global，省略则查询两者。`include_stopped` 默认 `false`；只有主 Agent 为定位已停止引用的记忆并准备恢复或审计时才设为 `true`，Adapter 对应使用 Mem0 `show_expired=true`。自动召回始终排除停止引用的记忆。
 
@@ -484,13 +484,12 @@ MemoryPlugin 的召回配置，与自动召回保持一致；调用方显式传�
 | 操作 | 语义 | 可逆性 | Mem0 行为 |
 | --- | --- | --- | --- |
 | Correct | 当前正文不准确，以新正文为准 | 可再次纠正 | 同 ID 更新正文、Embedding、实体和 UPDATE history |
-| Stop reference | 保留但默认不再召回 | 可恢复 | 设置早于当前 UTC 日期的 `expiration_date` |
-| Restore reference | 恢复默认召回 | 可再次停止 | 清空 `expiration_date` |
+| `memory_set_recall` | enabled=false 保留但默认不再召回；enabled=true 恢复默认召回 | 可逆 | 设置/清空 `expiration_date` |
 | Delete | 从活跃记忆库移除 | 无直接恢复 | 删除向量与实体关联，保留 DELETE history |
 
 不提供含糊的 `forget`。Mem0 原生删除仍在 history 中保留删除前正文，因此不能命名为物理擦除或 `purge`。
 
-Correct、Stop、Restore 和 Delete 执行前必须用 MemoryRef 读取目标并校验：
+Correct、`memory_set_recall` 和 Delete 执行前由 plugin 内部读取目标并校验：
 
 - 目标存在；
 - `user_id` 等于当前配置；

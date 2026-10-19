@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "plugin_id": "memory",
-  "plugin_version": "1.0.0",
+  "plugin_version": "2.0.0",
   "entrypoint": "agent_app.plugins.memory.factory:create_plugin",
   "python_requires": [
     "httpx>=0.27,<1"
@@ -10,12 +10,10 @@
   "provided_capabilities": [],
   "provided_tools": [
     "memory_recall",
-    "memory_get",
-    "memory_history",
+    "memory_read",
     "memory_remember",
     "memory_correct",
-    "memory_stop_reference",
-    "memory_restore_reference",
+    "memory_set_recall",
     "memory_delete"
   ],
   "published_events": [

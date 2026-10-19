@@ -1,4 +1,4 @@
-"""The eight fixed Agent-visible Memory tools."""
+"""The six fixed Agent-visible Memory tools."""
 
 from __future__ import annotations
 
@@ -53,23 +53,55 @@ class MemoryRecallTool(_MemoryTool):
         return ToolDefinition(
             "memory_recall",
             (
-                "Explicitly search long-term memory when automatic recall is "
-                "insufficient. An empty items list only means that this query "
-                "did not bring a relevant memory to mind; it does not prove "
-                "that no memory exists. When answering after an empty result, "
-                "say naturally that you cannot remember, such as ‘我记不起来了’. "
-                "Do not say that nothing was recalled, that there is no memory "
-                "about the user, or that the memory store is empty."
+                "Search long-term memory when automatic recall is insufficient. "
+                "An empty result does not prove that no memory exists. "
+                "Usually only `query` is needed."
             ),
             {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "minLength": 1},
-                    "is_workspace": {"type": ["boolean", "null"], "default": None},
-                    "include_stopped": {"type": "boolean", "default": False},
-                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": self.plugin.top_k},
-                    "threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": self.plugin.threshold},
-                    "max_context_chars": {"type": "integer", "minimum": 100, "maximum": 24000, "default": self.plugin.max_context_chars},
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Search text; use the user's wording or 2–5 key terms."
+                        ),
+                    },
+                    "is_workspace": {
+                        "type": ["boolean", "null"],
+                        "default": None,
+                        "description": (
+                            "Scope: omit for both; true for project (workspace) "
+                            "only; false for global only."
+                        ),
+                    },
+                    "include_stopped": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Include memories stopped from default recall; "
+                            "default false; usually omit."
+                        ),
+                    },
+                    "top_k": {
+                        "type": "integer", "minimum": 1, "maximum": 20,
+                        "default": self.plugin.top_k,
+                        "description": "Max results; default from config; usually omit.",
+                    },
+                    "threshold": {
+                        "type": "number", "minimum": 0, "maximum": 1,
+                        "default": self.plugin.threshold,
+                        "description": (
+                            "Min relevance 0–1; default from config; usually omit."
+                        ),
+                    },
+                    "max_context_chars": {
+                        "type": "integer", "minimum": 100, "maximum": 24000,
+                        "default": self.plugin.max_context_chars,
+                        "description": (
+                            "Result size budget; default from config; usually omit."
+                        ),
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -114,33 +146,43 @@ class MemoryRecallTool(_MemoryTool):
         return True
 
 
-class MemoryGetTool(_MemoryTool):
+class MemoryReadTool(_MemoryTool):
     @property
     def definition(self) -> ToolDefinition:
-        return _ref_definition("memory_get", "Read one owned memory by ref.")
+        return ToolDefinition(
+            "memory_read",
+            "Read one owned memory by ref. Set include_history=true to see its change log.",
+            {
+                "type": "object",
+                "properties": {
+                    "ref": _ref_schema(),
+                    "include_history": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include the memory's change history; default false.",
+                    },
+                },
+                "required": ["ref"],
+                "additionalProperties": False,
+            },
+        )
 
     def invoke(self, arguments, **execution) -> ToolExecutionResult:
         del execution
         try:
-            self._keys(arguments, required=frozenset({"ref"}))
-            return ToolExecutionResult(True, output=self.plugin.get(self._string(arguments, "ref")))
-        except Exception as error:
-            return self._failure(error)
-
-    def can_run_parallel(self, arguments: dict[str, Any]) -> bool:
-        return True
-
-
-class MemoryHistoryTool(_MemoryTool):
-    @property
-    def definition(self) -> ToolDefinition:
-        return _ref_definition("memory_history", "Read the audit history for one owned memory.")
-
-    def invoke(self, arguments, **execution) -> ToolExecutionResult:
-        del execution
-        try:
-            self._keys(arguments, required=frozenset({"ref"}))
-            return ToolExecutionResult(True, output=self.plugin.history(self._string(arguments, "ref")))
+            self._keys(
+                arguments, required=frozenset({"ref"}),
+                optional=frozenset({"include_history"}),
+            )
+            ref = self._string(arguments, "ref")
+            if not self._bool(arguments, "include_history", False):
+                return ToolExecutionResult(True, output=self.plugin.get(ref))
+            history = self.plugin.history(ref)
+            return ToolExecutionResult(True, output={
+                "ref": ref,
+                "memory": self.plugin.get(ref),
+                "history": history["history"],
+            })
         except Exception as error:
             return self._failure(error)
 
@@ -154,25 +196,31 @@ class MemoryRememberTool(_MemoryTool):
         return ToolDefinition(
             "memory_remember",
             (
-                "Proactively store a clearly stated preference, stable fact, "
-                "agreement, decision, or correction that will remain useful "
-                "across conversations, without asking for confirmation. Do not "
-                "store temporary details, guesses, credentials, or anything the "
-                "user asked you not to remember. When relationship tools are "
-                "enabled, store stable person profiles/preferences/identities "
-                "with relationship_remember and relations with relationship_relate; "
-                "use memory_remember for events/experiences, without duplicating "
-                "person profiles. If relationship is not enabled, keep the original "
-                "stable-fact behavior. A service failure is not permission to "
-                "silently redirect failed profile writes into Memory."
+                "Store a stable fact, preference, agreement, decision, or project "
+                "event worth keeping across conversations. Pass the user's original "
+                "wording; do not summarize or paraphrase."
             ),
             {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "minLength": 1},
-                    "is_workspace": {"type": "boolean"},
+                    "content": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Original user wording or the exact relevant passage; "
+                            "do not summarize or rewrite."
+                        ),
+                    },
+                    "is_workspace": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "true = project (workspace) level; false or omitted = "
+                            "global level (default)."
+                        ),
+                    },
                 },
-                "required": ["content", "is_workspace"],
+                "required": ["content"],
                 "additionalProperties": False,
             },
         )
@@ -183,7 +231,10 @@ class MemoryRememberTool(_MemoryTool):
     ) -> ToolExecutionResult:
         del task_id, step, task_messages
         try:
-            self._keys(arguments, required=frozenset({"content", "is_workspace"}))
+            self._keys(
+                arguments, required=frozenset({"content"}),
+                optional=frozenset({"is_workspace"}),
+            )
             is_workspace = self._bool(arguments, "is_workspace", False)
             return ToolExecutionResult(True, output=self.plugin.remember(
                 self._string(arguments, "content"),
@@ -198,12 +249,22 @@ class MemoryCorrectTool(_MemoryTool):
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
-            "memory_correct", "Replace the text of one owned memory.",
+            "memory_correct",
+            (
+                "Replace the text of one owned memory. Find it with memory_recall "
+                "first and copy its `ref`."
+            ),
             {
                 "type": "object",
                 "properties": {
-                    "ref": {"type": "string", "pattern": "^memory:.+"},
-                    "content": {"type": "string", "minLength": 1},
+                    "ref": _ref_schema(),
+                    "content": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "The complete replacement text; not a diff or an instruction."
+                        ),
+                    },
                 },
                 "required": ["ref", "content"],
                 "additionalProperties": False,
@@ -217,6 +278,41 @@ class MemoryCorrectTool(_MemoryTool):
             return ToolExecutionResult(True, output=self.plugin.correct(
                 self._string(arguments, "ref"), self._string(arguments, "content")
             ))
+        except Exception as error:
+            return self._failure(error)
+
+
+class MemorySetRecallTool(_MemoryTool):
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            "memory_set_recall",
+            "Stop or restore default recall for one owned memory without deleting it.",
+            {
+                "type": "object",
+                "properties": {
+                    "ref": _ref_schema(),
+                    "enabled": {
+                        "type": "boolean",
+                        "description": (
+                            "false = stop this memory from appearing in default recall "
+                            "but keep it; true = restore it to default recall."
+                        ),
+                    },
+                },
+                "required": ["ref", "enabled"],
+                "additionalProperties": False,
+            },
+        )
+
+    def invoke(self, arguments, **execution) -> ToolExecutionResult:
+        del execution
+        try:
+            self._keys(arguments, required=frozenset({"ref", "enabled"}))
+            ref = self._string(arguments, "ref")
+            enabled = self._bool(arguments, "enabled", False)
+            method = self.plugin.restore_reference if enabled else self.plugin.stop_reference
+            return ToolExecutionResult(True, output=method(ref))
         except Exception as error:
             return self._failure(error)
 
@@ -239,31 +335,32 @@ class _RefMutationTool(_MemoryTool):
             return self._failure(error)
 
 
-class MemoryStopReferenceTool(_RefMutationTool):
-    tool_name = "memory_stop_reference"
-    description = "Stop one memory from appearing in default recall without deleting it."
-    method_name = "stop_reference"
-
-
-class MemoryRestoreReferenceTool(_RefMutationTool):
-    tool_name = "memory_restore_reference"
-    description = "Restore one stopped memory to default recall."
-    method_name = "restore_reference"
-
-
 class MemoryDeleteTool(_RefMutationTool):
     tool_name = "memory_delete"
-    description = "Delete one owned active memory. This is not a history purge."
+    description = (
+        "Delete one owned active memory. Use only when the user explicitly asks "
+        "to forget or delete it. History is retained; this is not a purge."
+    )
     method_name = "delete"
 
 
 def create_memory_tools(plugin: MemoryPlugin) -> tuple[BaseTool, ...]:
     return (
-        MemoryRecallTool(plugin), MemoryGetTool(plugin), MemoryHistoryTool(plugin),
+        MemoryRecallTool(plugin), MemoryReadTool(plugin),
         MemoryRememberTool(plugin), MemoryCorrectTool(plugin),
-        MemoryStopReferenceTool(plugin), MemoryRestoreReferenceTool(plugin),
-        MemoryDeleteTool(plugin),
+        MemorySetRecallTool(plugin), MemoryDeleteTool(plugin),
     )
+
+
+def _ref_schema() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "pattern": "^memory:.+",
+        "description": (
+            "Reference from a memory_recall result, copied exactly, "
+            "in the form memory:<id>."
+        ),
+    }
 
 
 def _ref_definition(name: str, description: str) -> ToolDefinition:
@@ -271,7 +368,7 @@ def _ref_definition(name: str, description: str) -> ToolDefinition:
         name, description,
         {
             "type": "object",
-            "properties": {"ref": {"type": "string", "pattern": "^memory:.+"}},
+            "properties": {"ref": _ref_schema()},
             "required": ["ref"],
             "additionalProperties": False,
         },

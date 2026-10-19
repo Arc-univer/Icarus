@@ -18,7 +18,7 @@ def dependencies(tmp_path):
     }
 
 
-def test_factory注册memory_region和八个工具(tmp_path, monkeypatch):
+def test_factory注册memory_region和六个工具(tmp_path, monkeypatch):
     deps = dependencies(tmp_path)
     backend = BackendStub()
     monkeypatch.setattr(
@@ -36,7 +36,13 @@ def test_factory注册memory_region和八个工具(tmp_path, monkeypatch):
     manifest = json.loads(Path(
         "apps/agent/src/agent_app/plugins/memory/manifest.json"
     ).read_text())
-    assert [tool.definition.name for tool in registration.plugin.build_tools()] == manifest["provided_tools"]
+    expected_tools = [
+        "memory_recall", "memory_read", "memory_remember",
+        "memory_correct", "memory_set_recall", "memory_delete",
+    ]
+    assert [tool.definition.name for tool in registration.plugin.build_tools()] == expected_tools
+    assert manifest["provided_tools"] == expected_tools
+    assert manifest["plugin_version"] == "2.0.0"
     definition = registration.plugin.region_definition
     registry = deps[("blackboard", "region_registry")]
     registration.plugin.region_registration = registry.register(definition)

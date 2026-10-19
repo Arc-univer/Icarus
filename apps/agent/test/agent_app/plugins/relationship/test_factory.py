@@ -104,9 +104,10 @@ def test_actual_session_registers_optional_tools_and_static_guidance(tmp_path, m
     asyncio.run(run())
 
 
-def test_memory_guidance_and_tool_keep_relationship_split_and_fallback():
+def test_memory_guidance_and_relationship_guidance_split_and_fallback():
     from agent_app.plugins.memory.prompts import MEMORY_GUIDANCE
-    from agent_app.plugins.memory.tools import MemoryRememberTool
+    from agent_app.plugins.relationship.prompts import RELATIONSHIP_GUIDANCE
     assert "relationship" in MEMORY_GUIDANCE
-    assert "未" in MEMORY_GUIDANCE
-    assert "relationship_remember" in MemoryRememberTool(None).definition.description
+    assert "未启用" in MEMORY_GUIDANCE
+    assert "relationship_remember" in RELATIONSHIP_GUIDANCE
+    assert "relationship_relate" in RELATIONSHIP_GUIDANCE
