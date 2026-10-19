@@ -1,0 +1,7 @@
+# Keep maintainer-local docs ignored; publish Icarus feature specs and the
+# existing development principles explicitly.
+*
+!.gitignore
+!golden-principles.md
+!spec/
+!spec/**

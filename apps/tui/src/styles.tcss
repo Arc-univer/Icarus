@@ -33,13 +33,60 @@ Screen {
     text-overflow: ellipsis;
 }
 
-#conversation {
+#conversation-shell {
     height: 1fr;
+    layout: horizontal;
+}
+
+#conversation {
+    width: 1fr;
     padding: 1 2;
     scrollbar-size-vertical: 1;
     scrollbar-color: $icarus-tool;
     scrollbar-color-hover: $icarus-user;
     scrollbar-background: $icarus-background;
+}
+
+#turn-rail {
+    width: 2;
+    height: 1fr;
+    background: $icarus-surface;
+    color: $icarus-muted;
+}
+
+#new-output {
+    display: none;
+    position: absolute;
+    overlay: screen;
+    layer: _tooltips;
+    offset: 0 2;
+    width: 17;
+    height: 3;
+    min-width: 0;
+    background: $icarus-panel;
+    color: $icarus-accent;
+    border: round $icarus-border;
+}
+
+#turn-rail-dots {
+    width: 2;
+    height: 1fr;
+    content-align: center middle;
+}
+
+#turn-rail-excerpts {
+    display: none;
+    position: absolute;
+    overlay: screen;
+    layer: _tooltips;
+    offset: -20 0;
+    width: 20;
+    height: auto;
+    max-height: 22;
+    background: $icarus-panel;
+    color: $icarus-user;
+    border: round $icarus-border;
+    text-overflow: ellipsis;
 }
 
 .message {
@@ -97,30 +144,83 @@ Screen {
     height: auto;
 }
 
-.tool-message {
-    border-left: thick $icarus-tool;
+.run-card {
+    border-left: solid $icarus-border;
     padding: 0 1;
     background: $icarus-surface;
+}
+
+.run-card-label {
+    height: 1;
+    color: $icarus-muted;
+    text-style: bold;
+}
+
+.thinking-block,
+.assistant-progress,
+.tool-block,
+.user-correction-block {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+.thinking-block {
+    color: $icarus-muted;
+}
+
+.thinking-content,
+.assistant-progress .assistant-markdown {
+    height: auto;
+    padding-left: 2;
+}
+
+.disclosure-summary {
+    height: 1;
+    color: $icarus-user;
+}
+
+.disclosure-summary:focus {
+    background: $icarus-raised;
+    color: $icarus-accent;
+    text-style: bold;
+}
+
+.tool-block {
+    border-left: thick $icarus-tool;
+    padding: 0 1;
+    background: $icarus-raised;
 }
 
 .tool-summary {
     color: $icarus-user;
 }
 
-.tool-state {
+.tool-details {
     color: $icarus-muted;
+    padding-left: 2;
 }
 
-.tool-message.is-success .tool-state {
+.tool-block.is-success .tool-summary {
     color: $icarus-green;
 }
 
-.tool-message.is-failed .tool-state {
+.tool-block.is-failed .tool-summary {
     color: $icarus-red;
 }
 
-.tool-message.is-interrupted .tool-state {
+.tool-block.is-interrupted .tool-summary {
     color: $icarus-muted;
+}
+
+.correction-label {
+    color: $icarus-accent;
+    text-style: bold;
+}
+
+.correction-content {
+    color: $icarus-user;
+    padding-left: 2;
 }
 
 .error-message {
@@ -230,12 +330,88 @@ Screen {
     color: $icarus-muted;
 }
 
+#status-bar.phase-switching {
+    color: $icarus-accent;
+}
+
 #status-bar.phase-cancelling,
 #status-bar.phase-failed {
     color: $icarus-red;
 }
 
+SessionPicker {
+    align: center middle;
+    background: $icarus-background 70%;
+}
+
+#session-picker-panel {
+    width: 72;
+    max-width: 92%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round $icarus-border;
+    background: $icarus-panel;
+}
+
+#session-picker-title {
+    height: 1;
+    margin-bottom: 1;
+    color: $icarus-accent;
+    text-style: bold;
+}
+
+#session-list {
+    height: auto;
+    max-height: 16;
+    background: $icarus-panel;
+}
+
+#session-list > ListItem {
+    height: 1;
+    background: $icarus-panel;
+}
+
+#session-list > ListItem.-highlight {
+    color: $icarus-text;
+    background: $icarus-raised;
+    text-style: none;
+}
+
+.session-row {
+    width: 100%;
+    height: 1;
+}
+
+.session-current {
+    width: 2;
+    color: $icarus-accent;
+}
+
+.session-preview {
+    width: 1fr;
+    color: $icarus-text;
+    text-overflow: ellipsis;
+}
+
+.session-short-id {
+    width: 13;
+    color: $icarus-muted;
+    text-align: right;
+}
+
+#session-picker-help,
+#session-picker-empty {
+    height: 1;
+    margin-top: 1;
+    color: $icarus-muted;
+}
+
 Screen.-narrow #workspace-label {
+    display: none;
+}
+
+Screen.-narrow #turn-rail {
     display: none;
 }
 

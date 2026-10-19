@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from apps.agent.src.application.runtime_update_stream import RuntimeUpdateStream
-from apps.agent.src.runtime_update import RuntimeUpdate
+from agent_app.application.runtime_update_stream import RuntimeUpdateStream
+from icarus.core.runtime_update import RuntimeUpdate
 from apps.gateway.src.app import create_app
 
 
@@ -27,7 +27,7 @@ class RuntimeStub:
     def subscribe_updates(self):
         return self.stream.subscribe()
 
-    def get_session_status(self, workspace_path, session_id):
+    async def get_session_status(self, workspace_path, session_id):
         del workspace_path
         return {
             "workspace_key": "workspace",
@@ -91,15 +91,54 @@ def test_gateway按连接关注session过滤runtime_update():
                     workspace_key="workspace",
                     session_id="a",
                     task_id="task",
-                    type="assistant.text_delta",
-                    payload={"step": 1, "text": "hello"},
+                    type="assistant.thinking_delta",
+                    payload={"step": 1, "text": "considering"},
                     occurred_at=datetime.now(UTC),
                 ),
             )
             notification = websocket.receive_json()
             assert notification["method"] == "runtime.update"
             assert notification["params"]["session_id"] == "a"
-            assert notification["params"]["payload"]["text"] == "hello"
+            assert notification["params"]["type"] == (
+                "assistant.thinking_delta"
+            )
+            assert notification["params"]["payload"]["text"] == (
+                "considering"
+            )
+            assert notification["params"]["sequence"] is None
+
+
+def test_gateway通过既有runtime_update转发process状态():
+    runtime = RuntimeStub()
+    with TestClient(create_app(runtime)) as client:
+        with client.websocket_connect("/rpc") as websocket:
+            websocket.send_json(
+                request(
+                    "session.subscribe",
+                    {"workspace_key": "workspace", "session_id": "a"},
+                )
+            )
+            assert websocket.receive_json()["result"] == {"subscribed": True}
+            client.portal.call(
+                runtime.stream.publish,
+                RuntimeUpdate(
+                    workspace_key="workspace",
+                    session_id="a",
+                    task_id=None,
+                    type="process.updated",
+                    payload={
+                        "process_id": "proc_1",
+                        "pid": 123,
+                        "status": "running",
+                    },
+                    occurred_at=datetime.now(UTC),
+                ),
+            )
+            notification = websocket.receive_json()
+            assert notification["method"] == "runtime.update"
+            assert notification["params"]["type"] == "process.updated"
+            assert notification["params"]["task_id"] is None
+            assert notification["params"]["payload"]["status"] == "running"
 
 
 def test_jsonrpc_notification失败不返回error_response():

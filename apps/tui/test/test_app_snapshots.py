@@ -7,36 +7,38 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from apps.agent.src.agent_orchestration.capability import (
-    AgentTextDeltaEvent,
-    AgentToolCompletedEvent,
-    AgentToolStartedEvent,
+from packages.gateway_protocol import (
+    DiscardEmptySessionResultModel,
+    RuntimeUpdateModel,
+    SessionHistoryModel,
+    SessionSummaryModel,
 )
-from apps.agent.src.agent_orchestration.events import TaskErrorEvent
-from apps.agent.src.agent_orchestration.plugins import (
-    InputAccepted,
-    InputFinishedEvent,
-    InputStartedEvent,
+from apps.tui.src.gateway_client.models import (
+    SubmitAccepted,
+    TaskOperationResult,
 )
-from apps.agent.src.agent_orchestration.run_control import TaskOperationResult
-from apps.agent.src.agent_orchestration.tools import ToolExecutionResult
-from apps.agent.src.model_provider.types import ToolCall
-from packages.gateway_protocol import RuntimeUpdateModel, SessionHistoryModel
-from apps.tui.src.gateway_client.models import SubmitAccepted
 from apps.tui.src.app import IcarusTextualApp
 from apps.tui.src.chat_state import RuntimePhase
-from apps.tui.src.event_pipeline import AppendToolStarted, UpdateToolCompleted
+from apps.tui.src.event_pipeline import (
+    AppendAssistantDelta,
+    AppendToolStarted,
+    UpdateToolCompleted,
+)
+from apps.tui.src.screens import SessionPicker
 from apps.tui.src.widgets import (
     AssistantMessage,
+    AssistantProgressBlock,
     ConversationView,
     ErrorMessage,
     PersistentComposer,
     QueuePanel,
-    ToolMessage,
+    ThinkingBlock,
+    ToolBlock,
     TurnStatusMessage,
     UserMessage,
     WelcomeMessage,
 )
+from apps.tui.src.widgets.messages import StreamingMarkdown
 
 
 WORKSPACE = "/workspace/icarus-demo"
@@ -54,8 +56,11 @@ class SnapshotSubscription:
         return item
 
     def publish(self, source_plugin_id: str, event: object) -> None:
+        del source_plugin_id
         if not self.closed:
-            self.queue.put_nowait(_event_update(source_plugin_id, event))
+            if not isinstance(event, RuntimeUpdateModel):
+                raise TypeError("SnapshotSubscription accepts RuntimeUpdateModel")
+            self.queue.put_nowait(event)
 
     def close(self) -> None:
         if self.closed:
@@ -66,12 +71,15 @@ class SnapshotSubscription:
 
 class SnapshotService:
     session_id = "snapshot-session"
+    workspace_key = "workspace"
 
     def __init__(self) -> None:
         self.subscription = SnapshotSubscription()
         self.submissions: list[str] = []
         self.submission_images: list[tuple[Path, ...]] = []
+        self.steers: list[str] = []
         self.started = False
+        self.session_summaries = ()
 
     async def start(self) -> None:
         self.started = True
@@ -83,6 +91,23 @@ class SnapshotService:
 
     async def get_session_history(self, *, after_sequence=0):
         return SessionHistoryModel(records=(), history_cursor=after_sequence)
+
+    async def list_sessions(self):
+        return self.session_summaries
+
+    async def get_session_status(self):
+        return {
+            "workspace_key": self.workspace_key,
+            "session_id": self.session_id,
+            "lifecycle": "ready",
+        }
+
+    async def discard_empty_session(self, session_id):
+        return DiscardEmptySessionResultModel(
+            workspace_key=self.workspace_key,
+            session_id=session_id,
+            status="discarded",
+        )
 
     async def submit(
         self,
@@ -110,7 +135,7 @@ class SnapshotService:
             )
         )
         await asyncio.sleep(0)
-        return InputAccepted(task_id=task_id, queue_position=0)
+        return SubmitAccepted(task_id=task_id, queue_position=0)
 
     async def close(self) -> None:
         self.started = False
@@ -118,6 +143,19 @@ class SnapshotService:
 
     async def cancel_task(self, task_id: str, reason: str | None = None):
         del reason
+        return TaskOperationResult(task_id=task_id, status="accepted")
+
+    async def steer_task(
+        self,
+        task_id: str,
+        prompt: str,
+        *,
+        submission_id: str,
+        resources=(),
+        display_text=None,
+    ):
+        del submission_id, resources, display_text
+        self.steers.append(prompt)
         return TaskOperationResult(task_id=task_id, status="accepted")
 
     async def get_task_status(self, task_id):
@@ -142,7 +180,8 @@ class BlockingSnapshotService(SnapshotService):
 def make_app(service: SnapshotService | None = None) -> IcarusTextualApp:
     service = service or SnapshotService()
 
-    async def runtime_factory():
+    async def runtime_factory(session_id, create_if_missing):
+        del session_id, create_if_missing
         return service
 
     return IcarusTextualApp(
@@ -190,47 +229,17 @@ def publish(pilot, source_plugin_id: str, event: object) -> None:
     pilot.app.service.subscription.publish(source_plugin_id, event)
 
 
-def input_started(task_id: str = "task-1") -> InputStartedEvent:
-    return InputStartedEvent(task_id=task_id)
+def input_started(task_id: str = "task-1") -> RuntimeUpdateModel:
+    return runtime_update("task.started", task_id=task_id)
 
 
-def _event_update(source, event) -> RuntimeUpdateModel:
-    update_type = source
-    payload = {}
-    if isinstance(event, InputStartedEvent):
-        update_type = "task.started"
-    elif isinstance(event, InputFinishedEvent):
-        update_type = "task.finished"
-        payload = {"status": event.status, "run_id": event.run_id}
-    elif isinstance(event, AgentTextDeltaEvent):
-        update_type = "assistant.text_delta"
-        payload = {"step": event.step, "text": event.text}
-    elif isinstance(event, AgentToolStartedEvent):
-        update_type = "tool.started"
-        payload = {
-            "step": event.step, "call_id": event.tool_call.id,
-            "tool_name": event.tool_call.name,
-            "arguments": event.tool_call.arguments,
-        }
-    elif isinstance(event, AgentToolCompletedEvent):
-        update_type = "tool.completed"
-        payload = {
-            "step": event.step, "call_id": event.tool_call.id,
-            "tool_name": event.tool_call.name,
-            "success": event.result.success,
-            "error": event.result.error,
-        }
-    elif isinstance(event, TaskErrorEvent):
-        update_type = "task.error"
-        payload = {
-            "fatal": event.fatal, "code": event.code,
-            "error_type": event.error_type, "message": event.error_message,
-            "step": event.step, "run_id": event.run_id,
-        }
+def runtime_update(
+    update_type, *, task_id="task-1", payload=None
+) -> RuntimeUpdateModel:
     return RuntimeUpdateModel(
         workspace_key="workspace", session_id="snapshot-session",
-        task_id=getattr(event, "task_id", None), type=update_type, payload=payload,
-        occurred_at=getattr(event, "occurred_at", datetime.now(UTC)),
+        task_id=task_id, type=update_type, payload=payload or {},
+        occurred_at=datetime.now(UTC),
     )
 
 
@@ -243,6 +252,47 @@ def test_snapshot_initial_welcome(snap_compare):
     assert snap_compare(
         make_app(service),
         terminal_size=(100, 30),
+        run_before=prepare,
+    )
+
+
+def test_snapshot_session_picker(snap_compare):
+    service = SnapshotService()
+    service.session_summaries = (
+        SessionSummaryModel(
+            session_id="current-session-12345678",
+            first_user_input="Implement Session switching for the TUI",
+        ),
+        SessionSummaryModel(
+            session_id="older-session-87654321",
+            first_user_input=(
+                "Review a long first message that should fit the available row"
+            ),
+        ),
+    )
+    service.session_id = "current-session-12345678"
+
+    async def prepare(pilot) -> None:
+        await wait_ready(pilot)
+        await pilot.press(*"/resume", "enter")
+        await wait_until(pilot, lambda: isinstance(pilot.app.screen, SessionPicker))
+
+    assert snap_compare(
+        make_app(service),
+        terminal_size=(80, 24),
+        run_before=prepare,
+    )
+
+
+def test_snapshot_empty_session_picker(snap_compare):
+    async def prepare(pilot) -> None:
+        await wait_ready(pilot)
+        await pilot.press(*"/resume", "enter")
+        await wait_until(pilot, lambda: isinstance(pilot.app.screen, SessionPicker))
+
+    assert snap_compare(
+        make_app(),
+        terminal_size=(58, 18),
         run_before=prepare,
     )
 
@@ -357,8 +407,8 @@ def test_snapshot_image_markers_in_queue_and_draft(snap_compare, tmp_path):
 def test_snapshot_streaming_markdown_with_draft(snap_compare):
     markdown = (
         "# Implementation update\n\n"
-        "The runtime now streams **Markdown** while tools run.\n\n"
-        "- Composer stays editable\n"
+        "我用 RSS 抓了 **18 篇全文**，现在按终端宽度自然折行。\n\n"
+        "- 这次没有把 9 万 4 千字全压进上下文\n"
         "- Queue remains local\n\n"
         "```python\nawait service.submit(prompt)\n```"
     )
@@ -370,22 +420,70 @@ def test_snapshot_streaming_markdown_with_draft(snap_compare):
         publish(
             pilot,
             "agent",
-            AgentTextDeltaEvent(
+            runtime_update(
+                "assistant.text_delta",
                 task_id="task-1",
-                step=1,
-                text=markdown,
+                payload={"step": 1, "text": markdown},
             ),
         )
         await pilot.press(*"Add a focused regression test next")
         await wait_until(
             pilot,
             lambda: len(pilot.app.query(AssistantMessage)) == 1
-            and pilot.app.query_one(AssistantMessage).markdown_text == markdown,
+            and pilot.app.query_one(AssistantMessage).markdown_text
+            == markdown
+            and pilot.app.query_one(StreamingMarkdown).source == markdown
+            and len(pilot.app.query_one(StreamingMarkdown).children) >= 4
+            and pilot.app.query_one(StreamingMarkdown).children[-1].region.height
+            > 0,
         )
+        await pilot.pause()
 
     assert snap_compare(
         make_app(),
         terminal_size=(100, 34),
+        run_before=prepare,
+    )
+
+
+def test_snapshot_streaming_markdown_detached_from_bottom(snap_compare):
+    async def prepare(pilot) -> None:
+        await wait_ready(pilot)
+        conversation = pilot.app.query_one(ConversationView)
+        for index in range(24):
+            await conversation.append_user_message(
+                f"History message {index:02d} remains readable while output grows"
+            )
+        await pilot.pause()
+        conversation.resume_follow()
+        await pilot.pause()
+        conversation.page_up()
+        await pilot.pause()
+        detached_scroll = conversation.scroll_y
+
+        streamed = "".join(
+            f"\n\nStreaming paragraph {index} grows below the viewport."
+            for index in range(8)
+        )
+        await conversation.apply_action(
+            AppendAssistantDelta(task_id="task-1", text=streamed)
+        )
+        await wait_until(
+            pilot,
+            lambda: (
+                pilot.app.query_one(StreamingMarkdown).source == streamed
+                and pilot.app.query_one(StreamingMarkdown).children
+                and pilot.app.query_one(StreamingMarkdown).children[-1].region.height
+                > 0
+                and conversation.max_scroll_y > detached_scroll
+            ),
+        )
+        await pilot.pause()
+        assert conversation.scroll_y == detached_scroll
+
+    assert snap_compare(
+        make_app(),
+        terminal_size=(80, 24),
         run_before=prepare,
     )
 
@@ -398,13 +496,16 @@ def test_snapshot_running_with_pending_queue(snap_compare):
         publish(
             pilot,
             "agent",
-            AgentTextDeltaEvent(
+            runtime_update(
+                "assistant.text_delta",
                 task_id="task-1",
-                step=1,
-                text=(
-                    "The projection layer is in place. I am validating the "
-                    "full interaction flow now."
-                ),
+                payload={
+                    "step": 1,
+                    "text": (
+                        "The projection layer is in place. I am validating the "
+                        "full interaction flow now."
+                    ),
+                },
             ),
         )
         await pilot.press(*"Review the documentation", "enter")
@@ -416,10 +517,12 @@ def test_snapshot_running_with_pending_queue(snap_compare):
         )
         await wait_until(
             pilot,
-            lambda: pilot.app.query_one(QueuePanel).items
-            == (
-                "Review the documentation",
-                "Run the complete suite\nand inspect the snapshots",
+            lambda: (
+                pilot.app.query_one(QueuePanel).items == ()
+                and pilot.app.service.steers == [
+                    "Review the documentation",
+                    "Run the complete suite\nand inspect the snapshots",
+                ]
             ),
         )
 
@@ -431,12 +534,6 @@ def test_snapshot_running_with_pending_queue(snap_compare):
 
 
 def test_snapshot_tool_success_uses_positive_state_color(snap_compare):
-    tool_call = ToolCall(
-        id="call-read",
-        name="read_workspace_config",
-        arguments={"path": "settings.json"},
-    )
-
     async def prepare(pilot) -> None:
         await wait_ready(pilot)
         await submit_text(pilot, "Inspect the workspace configuration")
@@ -444,22 +541,22 @@ def test_snapshot_tool_success_uses_positive_state_color(snap_compare):
         await conversation.apply_action(
             AppendToolStarted(
                 task_id="task-1",
-                call_id=tool_call.id,
-                tool_name=tool_call.name,
+                call_id="call-read",
+                tool_name="read_workspace_config",
                 arguments_json='{"path":"settings.json"}',
             )
         )
         await conversation.apply_action(
             UpdateToolCompleted(
                 task_id="task-1",
-                call_id=tool_call.id,
-                tool_name=tool_call.name,
+                call_id="call-read",
+                tool_name="read_workspace_config",
                 success=True,
             )
         )
         await wait_until(
             pilot,
-            lambda: pilot.app.query_one(ToolMessage).success is True,
+            lambda: pilot.app.query_one(ToolBlock).success is True,
         )
 
     assert snap_compare(
@@ -469,13 +566,138 @@ def test_snapshot_tool_success_uses_positive_state_color(snap_compare):
     )
 
 
-def test_snapshot_tool_failure_and_agent_error(snap_compare):
-    tool_call = ToolCall(
-        id="call-settings",
-        name="read_workspace_config",
-        arguments={"path": "settings.json"},
+def test_snapshot_run_card_thinking_correction_and_tool_preview(snap_compare):
+    async def prepare(pilot) -> None:
+        await wait_ready(pilot)
+        await submit_text(pilot, "Inspect the current implementation")
+        publish(pilot, "user-input", input_started())
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "assistant.thinking_delta",
+                payload={"step": 1, "text": "Checking the event path..."},
+            ),
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "assistant.thinking",
+                payload={
+                    "step": 1,
+                    "text": "Checking the event path and persistence boundary.",
+                    "partial": False,
+                },
+            ),
+        )
+        intermediate = (
+            "This event boundary is useful. I will inspect the current "
+            "implementation before deciding."
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "assistant.text_delta",
+                payload={"step": 1, "text": intermediate},
+            ),
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "assistant.message",
+                payload={"step": 1, "text": intermediate},
+            ),
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "tool.started",
+                payload={
+                    "step": 1,
+                    "call_id": "call-read",
+                    "tool_name": "read_file",
+                    "arguments": {"path": "apps/tui/src/app.py"},
+                },
+            ),
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "tool.completed",
+                payload={
+                    "step": 1,
+                    "call_id": "call-read",
+                    "tool_name": "read_file",
+                    "success": True,
+                    "error": None,
+                    "output_preview": {
+                        "matches": 3,
+                        "summary": "Command and queue flow located",
+                    },
+                    "preview_truncated": True,
+                    "full_result_available": True,
+                    "preview_error": None,
+                },
+            ),
+        )
+        publish(
+            pilot,
+            "user-input",
+            runtime_update(
+                "user.correction",
+                payload={
+                    "text": "Also verify reconnect behavior.",
+                    "applied_before_step": 2,
+                },
+            ),
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "assistant.thinking_delta",
+                payload={
+                    "step": 2,
+                    "text": "Now checking idempotent retry after reconnect.",
+                },
+            ),
+        )
+        publish(
+            pilot,
+            "agent",
+            runtime_update(
+                "assistant.text_delta",
+                payload={
+                    "step": 2,
+                    "text": "The implementation is ready for review.",
+                },
+            ),
+        )
+        await wait_until(
+            pilot,
+            lambda: (
+                len(pilot.app.query(ThinkingBlock)) == 2
+                and pilot.app.query_one(ToolBlock).success is True
+                and len(pilot.app.query(AssistantMessage)) == 2
+                and len(pilot.app.query(AssistantProgressBlock)) == 0
+            ),
+        )
+        pilot.app.query_one(ToolBlock).set_expanded(True)
+        await pilot.pause()
+
+    assert snap_compare(
+        make_app(),
+        terminal_size=(100, 50),
+        run_before=prepare,
     )
 
+
+def test_snapshot_tool_failure_and_agent_error(snap_compare):
     async def prepare(pilot) -> None:
         await wait_ready(pilot)
         await submit_text(pilot, "Inspect the workspace configuration")
@@ -483,59 +705,74 @@ def test_snapshot_tool_failure_and_agent_error(snap_compare):
         publish(
             pilot,
             "agent",
-            AgentTextDeltaEvent(
+            runtime_update(
+                "assistant.text_delta",
                 task_id="task-1",
-                step=1,
-                text="I will read the workspace configuration first.",
+                payload={
+                    "step": 1,
+                    "text": "I will read the workspace configuration first.",
+                },
             ),
         )
         publish(
             pilot,
             "agent",
-            AgentToolStartedEvent(
+            runtime_update(
+                "tool.started",
                 task_id="task-1",
-                step=1,
-                tool_call=tool_call,
+                payload={
+                    "step": 1,
+                    "call_id": "call-settings",
+                    "tool_name": "read_workspace_config",
+                    "arguments": {"path": "settings.json"},
+                },
             ),
         )
         publish(
             pilot,
             "agent",
-            AgentToolCompletedEvent(
+            runtime_update(
+                "tool.completed",
                 task_id="task-1",
-                step=1,
-                tool_call=tool_call,
-                result=ToolExecutionResult(
-                    success=False,
-                    error="permission denied",
-                ),
+                payload={
+                    "step": 1,
+                    "call_id": "call-settings",
+                    "tool_name": "read_workspace_config",
+                    "success": False,
+                    "error": "permission denied",
+                },
             ),
         )
         publish(
             pilot,
             "agent",
-            TaskErrorEvent(
+            runtime_update(
+                "task.error",
                 task_id="task-1",
-                fatal=True,
-                code="agent_run_failed",
-                step=1,
-                error_type="ToolExecutionError",
-                error_message="Could not read settings.json",
+                payload={
+                    "fatal": True,
+                    "code": "agent_run_failed",
+                    "step": 1,
+                    "error_type": "ToolExecutionError",
+                    "message": "Could not read settings.json",
+                    "run_id": None,
+                },
             ),
         )
         publish(
             pilot,
             "user-input",
-            InputFinishedEvent(
+            runtime_update(
+                "task.finished",
                 task_id="task-1",
-                status="failed",
+                payload={"status": "failed", "run_id": None},
             ),
         )
         await wait_until(
             pilot,
             lambda: len(pilot.app.query(ErrorMessage)) == 1
             and len(pilot.app.query(TurnStatusMessage)) == 1
-            and pilot.app.query_one(ToolMessage).success is False,
+            and pilot.app.query_one(ToolBlock).success is False,
         )
 
     assert snap_compare(
@@ -555,10 +792,10 @@ def test_snapshot_narrow_running_layout(snap_compare):
         publish(
             pilot,
             "agent",
-            AgentTextDeltaEvent(
+            runtime_update(
+                "assistant.text_delta",
                 task_id="task-1",
-                step=1,
-                text=expected_markdown,
+                payload={"step": 1, "text": expected_markdown},
             ),
         )
         await pilot.press(*"Queue this follow-up", "enter")
@@ -566,13 +803,19 @@ def test_snapshot_narrow_running_layout(snap_compare):
         await wait_until(
             pilot,
             lambda: (
-                pilot.app.query_one(QueuePanel).items
-                == ("Queue this follow-up",)
+                pilot.app.query_one(QueuePanel).items == ()
+                and pilot.app.service.steers == ["Queue this follow-up"]
                 and len(pilot.app.query(AssistantMessage)) == 1
                 and pilot.app.query_one(AssistantMessage).markdown_text
                 == expected_markdown
+                and pilot.app.query_one(StreamingMarkdown).source
+                == expected_markdown
+                and len(pilot.app.query_one(StreamingMarkdown).children) >= 1
+                and pilot.app.query_one(StreamingMarkdown).children[-1].region.height
+                > 0
             ),
         )
+        await pilot.pause()
 
     assert snap_compare(
         make_app(),

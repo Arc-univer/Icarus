@@ -1,6 +1,7 @@
 from packages.gateway_protocol import RuntimeUpdateModel
 from apps.tui.src.event_pipeline.actions import (
     AppendUserMessage,
+    AppendUserCorrection,
     FinishTurn,
     SetRuntimeStatus,
 )
@@ -19,6 +20,12 @@ def test_user_input_projector映射生命周期():
     assert projector.project(
         update("user.message", {"text": "hello", "resources": []})
     ) == (AppendUserMessage("task-1", "hello"),)
+    assert projector.project(
+        update(
+            "user.correction",
+            {"text": "change it", "resources": [], "applied_before_step": 2},
+        )
+    ) == (AppendUserCorrection("task-1", "change it", 2),)
     assert projector.project(update("task.accepted", {"queue_position": 0})) == (
         SetRuntimeStatus("task-1", "accepted", "Accepted by runtime"),
     )

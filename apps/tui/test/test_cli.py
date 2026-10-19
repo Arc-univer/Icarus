@@ -14,26 +14,37 @@ def test_run_app_使用启动目录透传session_id并返回textual结果(monkey
 
     service = object()
 
-    async def create_gateway_client(workspace_path, session_id, gateway_url):
+    async def create_gateway_client(
+        workspace_path, session_id, gateway_url, create_if_missing
+    ):
         assert captured["app_run_entered"] is True
         captured["service_workspace"] = workspace_path
         captured["session_id"] = session_id
         captured["gateway_url"] = gateway_url
+        captured["create_if_missing"] = create_if_missing
         return service
 
     class AppStub:
         return_code = None
 
-        def __init__(self, *, runtime_factory, workspace_path, resource_root):
+        def __init__(
+            self,
+            *,
+            runtime_factory,
+            initial_session_id,
+            workspace_path,
+            resource_root,
+        ):
             captured["runtime_factory"] = runtime_factory
             captured["app_workspace"] = workspace_path
+            captured["initial_session_id"] = initial_session_id
             captured["resource_root"] = resource_root
             captured["app_run_entered"] = False
 
         def run(self):
             captured["app_run_entered"] = True
             captured["app_service"] = asyncio.run(
-                captured["runtime_factory"]()
+                captured["runtime_factory"]("selected", False)
             )
             return 7
 
@@ -53,7 +64,9 @@ def test_run_app_使用启动目录透传session_id并返回textual结果(monkey
     assert result == 7
     assert captured["service_workspace"] == tmp_path.resolve()
     assert captured["app_workspace"] == tmp_path.resolve()
-    assert captured["session_id"] == "demo"
+    assert captured["initial_session_id"] == "demo"
+    assert captured["session_id"] == "selected"
+    assert captured["create_if_missing"] is False
     assert captured["gateway_url"] == "ws://test/rpc"
     assert captured["resource_root"] == (tmp_path / "data" / "incoming")
     assert captured["app_service"] is service
@@ -79,9 +92,12 @@ def test_parse_args_help不初始化runtime(monkeypatch, capsys):
 def test_import_main首帧模块边界不加载agent与provider重依赖():
     project_root = Path(__file__).resolve().parents[3]
     forbidden = [
-        "apps.agent.src.application.agent_runtime_service",
-        "apps.agent.src.application.agent_runtime",
-        "apps.agent.src.agent_orchestration.agent_factory",
+        "agent_app",
+        "icarus",
+        "agent_app.application.controllers.session_api",
+        "agent_app.application.agent_runtime_service",
+        "agent_app.application.agent_runtime",
+        "agent_app.assembly",
         "openai",
         "anthropic",
         "onnxruntime",
@@ -122,36 +138,14 @@ def test_main_keyboard_interrupt返回130(monkeypatch):
     assert main_module.main([]) == 130
 
 
-def test_pyproject_console_script指向main入口():
-    import tomllib
-
+def test_tui依赖和脚本归属当前app():
     project_root = Path(__file__).resolve().parents[3]
-    with (project_root / "pyproject.toml").open("rb") as file:
-        pyproject = tomllib.load(file)
+    requirements = (project_root / "apps/tui/requirements.txt").read_text()
+    start_script = (project_root / "apps/tui/scripts/start.sh").read_text()
 
-    assert (
-        pyproject["project"]["scripts"]["icarus"]
-        == "apps.tui.src.main:main"
-    )
-    assert "apps/agent/settings.json" not in pyproject["project"]["dependencies"]
-    assert pyproject["tool"]["setuptools"]["package-data"]["apps.agent"] == [
-        "settings.json"
-    ]
-    assert pyproject["tool"]["setuptools"]["package-data"]["apps.tui.src"] == [
-        "styles.tcss"
-    ]
-    dependencies = pyproject["project"]["dependencies"]
-    assert any(item.startswith("textual>=") for item in dependencies)
-    assert not any(item.startswith("prompt-toolkit") for item in dependencies)
-    assert pyproject["project"]["optional-dependencies"]["test"] == [
-        "httpx",
-        "pytest-textual-snapshot>=1.1,<2",
-    ]
-    assert pyproject["project"]["scripts"]["icarus-gateway"] == (
-        "apps.gateway.src.main:main"
-    )
-    assert pyproject["tool"]["setuptools"]["packages"]["find"]["exclude"] == [
-        "apps.agent.test*",
-        "apps.gateway.test*",
-        "apps.tui.test*",
-    ]
+    assert "textual>=8.2.8,<9" in requirements
+    assert "websockets" in requirements
+    assert "openai" not in requirements
+    assert "anthropic" not in requirements
+    assert "apps.tui.src.main" in start_script
+    assert "PYTHONPATH" in start_script

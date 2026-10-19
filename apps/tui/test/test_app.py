@@ -7,35 +7,56 @@ import threading
 import pytest
 from textual.widgets import Static
 
-from apps.agent.src.agent_orchestration.capability import AgentTextDeltaEvent
-from apps.agent.src.agent_orchestration.plugins import (
-    InputAccepted,
-    InputFinishedEvent,
-    InputQueuedEvent,
+from packages.gateway_protocol import (
+    DiscardEmptySessionResultModel,
+    RuntimeUpdateModel,
+    SessionHistoryModel,
+    SessionSummaryModel,
 )
-from apps.agent.src.agent_orchestration.run_control import TaskOperationResult
-from packages.gateway_protocol import RuntimeUpdateModel, SessionHistoryModel
-from apps.tui.src.gateway_client.models import SubmitAccepted
-from apps.tui.src.app import IcarusTextualApp, RuntimeSubscriptionFailed
+from apps.tui.src.gateway_client.models import (
+    SubmitAccepted,
+    TaskOperationResult,
+)
+from apps.tui.src.app import (
+    IcarusTextualApp,
+    PreparedSession,
+    RuntimeSubscriptionFailed,
+)
 from apps.tui.src.chat_state import RuntimePhase
 from apps.tui.src.clipboard import (
     ClipboardImage,
     ClipboardImageReadError,
 )
-from apps.tui.src.event_pipeline import FinishTurn, ShowNotification
+from apps.tui.src.event_pipeline import (
+    AppendAssistantDelta,
+    AppendUserMessage,
+    CompleteAssistantMessage,
+    FinishTurn,
+    ShowNotification,
+)
+from apps.tui.src.screens import SessionPicker
 from apps.tui.src.event_pipeline.dispatcher import ProjectorRegistry
+from apps.tui.src.gateway_client import (
+    GatewayClientError,
+    GatewayTransportError,
+)
 from apps.tui.src.widgets import (
     AssistantMessage,
+    AssistantProgressBlock,
     ConversationView,
     PersistentComposer,
     QueuePanel,
     RuntimeStatusBar,
+    RunCard,
+    TurnRail,
+    ThinkingBlock,
 )
 from apps.tui.src.widgets.messages import (
     ErrorMessage,
-    ToolMessage,
+    ToolBlock,
     TurnStatusMessage,
     UserMessage,
+    UserCorrectionBlock,
 )
 
 
@@ -53,7 +74,10 @@ class ControlledSubscription:
         return item
 
     def publish(self, source, event) -> None:
-        self.queue.put_nowait(_event_update(source, event))
+        del source
+        if not isinstance(event, RuntimeUpdateModel):
+            raise TypeError("ControlledSubscription accepts RuntimeUpdateModel")
+        self.queue.put_nowait(event)
 
     def close(self) -> None:
         if self.closed:
@@ -77,6 +101,8 @@ class ControlledService:
         subscription_close_error: BaseException | None = None,
         stop_error: BaseException | None = None,
         cancel_error: BaseException | None = None,
+        steer_error: BaseException | None = None,
+        steer_status: str = "accepted",
     ) -> None:
         self.actions = []
         self.subscription = ControlledSubscription(
@@ -93,13 +119,24 @@ class ControlledService:
         self.subscribe_error = subscribe_error
         self.stop_error = stop_error
         self.cancel_error = cancel_error
+        self.steer_error = steer_error
+        self.steer_status = steer_status
         self.submissions = []
         self.submission_images: list[tuple[Path, ...]] = []
         self.session_id = "test-session"
+        self.workspace_key = "workspace"
         self.stopped = False
         self.cancelled_tasks = []
+        self.steers = []
         self.task_statuses = {}
         self.history = SessionHistoryModel(records=(), history_cursor=0)
+        self.session_summaries = ()
+        self.session_status = {
+            "workspace_key": self.workspace_key,
+            "session_id": self.session_id,
+            "lifecycle": "ready",
+        }
+        self.discarded_sessions = []
 
     async def start(self) -> None:
         self.actions.append("service-start")
@@ -118,6 +155,27 @@ class ControlledService:
     async def get_session_history(self, *, after_sequence=0):
         self.actions.append(f"history:{after_sequence}")
         return self.history
+
+    async def list_sessions(self):
+        self.actions.append("session-list")
+        return self.session_summaries
+
+    async def get_session_status(self):
+        self.actions.append("session-status")
+        return self.session_status
+
+    async def discard_empty_session(self, session_id):
+        self.actions.append(f"discard:{session_id}")
+        self.discarded_sessions.append(session_id)
+        return DiscardEmptySessionResultModel(
+            workspace_key=self.workspace_key,
+            session_id=session_id,
+            status=(
+                "not_empty"
+                if session_id == self.session_id and self.submissions
+                else "discarded"
+            ),
+        )
 
     async def submit(
         self, prompt, *, submission_id, resources=(), display_text=None
@@ -147,13 +205,14 @@ class ControlledService:
         if self.publish_queued_before_return:
             self.subscription.publish(
                 "user-input",
-                InputQueuedEvent(
+                runtime_update(
+                    "task.accepted",
                     task_id=task_id,
-                    queue_position=0,
+                    payload={"queue_position": 0},
                 ),
             )
             await asyncio.sleep(0)
-        return InputAccepted(task_id=task_id, queue_position=0)
+        return SubmitAccepted(task_id=task_id, queue_position=0)
 
     async def close(self) -> None:
         self.actions.append("service-stop")
@@ -168,6 +227,22 @@ class ControlledService:
             raise self.cancel_error
         return TaskOperationResult(task_id=task_id, status="accepted")
 
+    async def steer_task(
+        self,
+        task_id,
+        prompt,
+        *,
+        submission_id,
+        resources=(),
+        display_text=None,
+    ):
+        self.steers.append(
+            (task_id, prompt, tuple(resources), display_text, submission_id)
+        )
+        if self.steer_error is not None:
+            raise self.steer_error
+        return TaskOperationResult(task_id=task_id, status=self.steer_status)
+
     async def get_task_status(self, task_id):
         return self.task_statuses.get(
             task_id, {"task_id": task_id, "lifecycle": "running"}
@@ -180,13 +255,98 @@ class ReconnectingService(ControlledService):
         self.subscription = ControlledSubscription(self.actions)
         return self.subscription
 
+
+class BlockingSteerService(ReconnectingService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.steer_entered = asyncio.Event()
+        self.steer_release = asyncio.Event()
+        self.steer_attempt_ids: list[str] = []
+
+    async def steer_task(
+        self,
+        task_id,
+        prompt,
+        *,
+        submission_id,
+        resources=(),
+        display_text=None,
+    ):
+        self.steer_attempt_ids.append(submission_id)
+        self.steer_entered.set()
+        await self.steer_release.wait()
+        return await super().steer_task(
+            task_id,
+            prompt,
+            submission_id=submission_id,
+            resources=resources,
+            display_text=display_text,
+        )
+
+
+class RetryingSteerService(ReconnectingService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.steer_attempts: list[tuple[str, str, str]] = []
+
+    async def steer_task(
+        self,
+        task_id,
+        prompt,
+        *,
+        submission_id,
+        resources=(),
+        display_text=None,
+    ):
+        self.steer_attempts.append((task_id, prompt, submission_id))
+        if len(self.steer_attempts) == 1:
+            raise GatewayTransportError("connection lost")
+        return await super().steer_task(
+            task_id,
+            prompt,
+            submission_id=submission_id,
+            resources=resources,
+            display_text=display_text,
+        )
+
+
+class LateTransportSteerService(ReconnectingService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_steer_entered = asyncio.Event()
+        self.first_steer_release = asyncio.Event()
+        self.steer_attempts: list[tuple[str, str, str]] = []
+
+    async def steer_task(
+        self,
+        task_id,
+        prompt,
+        *,
+        submission_id,
+        resources=(),
+        display_text=None,
+    ):
+        self.steer_attempts.append((task_id, prompt, submission_id))
+        if len(self.steer_attempts) == 1:
+            self.first_steer_entered.set()
+            await self.first_steer_release.wait()
+            raise GatewayTransportError("old connection lost")
+        return await super().steer_task(
+            task_id,
+            prompt,
+            submission_id=submission_id,
+            resources=resources,
+            display_text=display_text,
+        )
+
 def make_app(
     service: ControlledService,
     workspace_path,
     *,
     projector_registry: ProjectorRegistry | None = None,
 ) -> IcarusTextualApp:
-    async def runtime_factory():
+    async def runtime_factory(session_id, create_if_missing):
+        del session_id, create_if_missing
         service.actions.append("factory")
         return service
 
@@ -194,6 +354,28 @@ def make_app(
         runtime_factory=runtime_factory,
         workspace_path=workspace_path,
         projector_registry=projector_registry,
+    )
+
+
+def make_session_app(
+    current: ControlledService,
+    candidates: dict[str | None, ControlledService],
+    workspace_path,
+):
+    calls = []
+
+    async def runtime_factory(session_id, create_if_missing):
+        calls.append((session_id, create_if_missing))
+        if len(calls) == 1:
+            return current
+        return candidates[session_id]
+
+    return (
+        IcarusTextualApp(
+            runtime_factory=runtime_factory,
+            workspace_path=workspace_path,
+        ),
+        calls,
     )
 
 
@@ -212,34 +394,24 @@ async def enter_text(pilot, text: str) -> None:
     await pilot.pause()
 
 
-def finish_event(task_id: str, status="completed") -> InputFinishedEvent:
-    return InputFinishedEvent(
+def finish_event(task_id: str, status="completed") -> RuntimeUpdateModel:
+    return runtime_update(
+        "task.finished",
         task_id=task_id,
-        status=status,
+        payload={"status": status, "run_id": None},
     )
 
 
-def _event_update(source, event) -> RuntimeUpdateModel:
-    if isinstance(event, RuntimeUpdateModel):
-        return event
-    update_type = source
-    payload = {}
-    if isinstance(event, InputQueuedEvent):
-        update_type = "task.accepted"
-        payload = {"queue_position": event.queue_position}
-    elif isinstance(event, InputFinishedEvent):
-        update_type = "task.finished"
-        payload = {"status": event.status, "run_id": event.run_id}
-    elif isinstance(event, AgentTextDeltaEvent):
-        update_type = "assistant.text_delta"
-        payload = {"step": event.step, "text": event.text}
+def runtime_update(
+    update_type, *, task_id="task-1", payload=None
+) -> RuntimeUpdateModel:
     return RuntimeUpdateModel(
         workspace_key="workspace",
         session_id="test-session",
-        task_id=getattr(event, "task_id", None),
+        task_id=task_id,
         type=update_type,
-        payload=payload,
-        occurred_at=getattr(event, "occurred_at", datetime.now(UTC)),
+        payload=payload or {},
+        occurred_at=datetime.now(UTC),
     )
 
 
@@ -256,13 +428,15 @@ def _history_update(sequence, update_type, payload=None):
 
 
 class FailingProjector:
-    def project(self, event):
+    def project(self, event, *, historical=False):
+        del historical
         del event
         raise RuntimeError("projector exploded")
 
 
 class NotificationThenFinishProjector:
-    def project(self, event):
+    def project(self, event, *, historical=False):
+        del historical
         return (
             ShowNotification(level="information", text="finished"),
             FinishTurn(task_id=event.task_id, status="completed"),
@@ -270,7 +444,8 @@ class NotificationThenFinishProjector:
 
 
 class UnknownActionProjector:
-    def project(self, event):
+    def project(self, event, *, historical=False):
+        del historical
         del event
         return (object(),)
 
@@ -307,6 +482,496 @@ def test_app启动订阅后ready并保持composer焦点(tmp_path):
     assert app.return_code == 0
 
 
+def test_resume选择session后复用历史激活路径并清理旧空session(tmp_path):
+    async def run():
+        current = ControlledService()
+        current.session_id = "current-empty"
+        current.session_status["session_id"] = current.session_id
+        current.session_summaries = (
+            SessionSummaryModel(
+                session_id="old-session",
+                first_user_input="old question",
+            ),
+        )
+        target = ControlledService()
+        target.session_id = "old-session"
+        target.session_status["session_id"] = target.session_id
+        target.history = SessionHistoryModel(
+            records=(
+                RuntimeUpdateModel(
+                    workspace_key="workspace",
+                    session_id="old-session",
+                    task_id="old-task",
+                    type="user.message",
+                    payload={"text": "old question", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=1,
+                ),
+            ),
+            history_cursor=1,
+        )
+        app, calls = make_session_app(
+            current, {"old-session": target}, tmp_path
+        )
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/resume")
+            await wait_until(pilot, lambda: isinstance(app.screen, SessionPicker))
+            await pilot.press("enter")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.service is target
+                    and app.chat_state.phase == RuntimePhase.READY
+                ),
+            )
+            result = (
+                calls,
+                [item.message_text for item in app.query(UserMessage)],
+                current.stopped,
+                tuple(target.discarded_sessions),
+                app._last_sequence,
+                app._session_has_user_input,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: target.stopped)
+            return result
+
+    calls, messages, old_stopped, discarded, cursor, has_input = asyncio.run(
+        run()
+    )
+    assert calls == [(None, True), ("old-session", False)]
+    assert messages == ["old question"]
+    assert old_stopped is True
+    assert discarded == ("current-empty",)
+    assert cursor == 1
+    assert has_input is True
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ({"lifecycle": "ready"}, True),
+        ({"lifecycle": "unloaded"}, True),
+        # Background work keeps the Session in "running" but must not block
+        # resuming or clearing.
+        ({"lifecycle": "running", "background_work_count": 1}, True),
+        ({"lifecycle": "running", "active_task_ids": ["task-1"]}, False),
+        ({"lifecycle": "loading"}, False),
+        ({"lifecycle": "unloading"}, False),
+        ({"lifecycle": "failed"}, False),
+        ({"lifecycle": "ready", "queued_task_count": 1}, False),
+        ({"lifecycle": "ready", "pending_event_count": 1}, False),
+        ({"lifecycle": "ready", "pending_plugin_event_count": 1}, False),
+    ],
+)
+def test_status_is_idle判定(status, expected):
+    assert IcarusTextualApp._status_is_idle(status) is expected
+
+
+def test_resume有后台进程的当前session仍可切换(tmp_path):
+    async def run():
+        current = ControlledService()
+        current.session_id = "current-bg"
+        current.session_status.update(
+            {
+                "session_id": current.session_id,
+                "lifecycle": "running",
+                "background_work_count": 1,
+            }
+        )
+        current.session_summaries = (
+            SessionSummaryModel(
+                session_id="old-session",
+                first_user_input="old question",
+            ),
+        )
+        target = ControlledService()
+        target.session_id = "old-session"
+        target.session_status.update(
+            {
+                "session_id": target.session_id,
+                "lifecycle": "running",
+                "background_work_count": 1,
+            }
+        )
+        target.history = SessionHistoryModel(
+            records=(
+                RuntimeUpdateModel(
+                    workspace_key="workspace",
+                    session_id="old-session",
+                    task_id="old-task",
+                    type="user.message",
+                    payload={"text": "old question", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=1,
+                ),
+            ),
+            history_cursor=1,
+        )
+        app, _ = make_session_app(current, {"old-session": target}, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/resume")
+            await wait_until(pilot, lambda: isinstance(app.screen, SessionPicker))
+            await pilot.press("enter")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.service is target
+                    and app.chat_state.phase == RuntimePhase.READY
+                ),
+            )
+            result = (
+                app.service is target,
+                [item.message_text for item in app.query(UserMessage)],
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: target.stopped)
+            return result
+
+    switched, messages = asyncio.run(run())
+    assert switched is True
+    assert messages == ["old question"]
+
+
+def test_clear从非空session创建新session并显示空会话(tmp_path):
+    async def run():
+        current = ControlledService()
+        current.session_id = "current"
+        current.session_status["session_id"] = current.session_id
+        current.history = SessionHistoryModel(
+            records=(
+                RuntimeUpdateModel(
+                    workspace_key="workspace",
+                    session_id="current",
+                    task_id="task",
+                    type="user.message",
+                    payload={"text": "keep me", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=1,
+                ),
+            ),
+            history_cursor=1,
+        )
+        fresh = ControlledService()
+        fresh.session_id = "fresh"
+        fresh.session_status["session_id"] = fresh.session_id
+        app, calls = make_session_app(current, {None: fresh}, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/clear")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.service is fresh
+                    and app.chat_state.phase == RuntimePhase.READY
+                ),
+            )
+            result = (
+                calls,
+                len(app.query(UserMessage)),
+                len(app.query(".welcome-message")),
+                current.stopped,
+                tuple(fresh.discarded_sessions),
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: fresh.stopped)
+            return result
+
+    calls, user_count, welcome_count, old_stopped, discarded = asyncio.run(
+        run()
+    )
+    assert calls == [(None, True), (None, True)]
+    assert user_count == 0
+    assert welcome_count == 1
+    assert old_stopped is True
+    assert "current" not in discarded
+
+
+def test_clear在空session不创建另一个session(tmp_path):
+    async def run():
+        current = ControlledService()
+        app, calls = make_session_app(current, {}, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/clear")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.chat_state.phase == RuntimePhase.READY
+                    and app._session_operation_worker is not None
+                    and app._session_operation_worker.is_finished
+                ),
+            )
+            result = calls, app.service is current, current.submissions
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: current.stopped)
+            return result
+
+    calls, unchanged, submissions = asyncio.run(run())
+    assert calls == [(None, True)]
+    assert unchanged is True
+    assert submissions == []
+
+
+def test_clear候选启动失败时保留当前session并清理候选(tmp_path):
+    async def run():
+        current = ControlledService()
+        current.session_id = "current"
+        current.session_status["session_id"] = current.session_id
+        current.history = SessionHistoryModel(
+            records=(
+                RuntimeUpdateModel(
+                    workspace_key="workspace",
+                    session_id="current",
+                    task_id="task",
+                    type="user.message",
+                    payload={"text": "keep me", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=1,
+                ),
+            ),
+            history_cursor=1,
+        )
+        failed = ControlledService(start_error=RuntimeError("start failed"))
+        failed.session_id = "failed-candidate"
+        app, calls = make_session_app(current, {None: failed}, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/clear")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app._session_operation_worker is not None
+                    and app._session_operation_worker.is_finished
+                ),
+            )
+            result = (
+                calls,
+                app.service is current,
+                [item.message_text for item in app.query(UserMessage)],
+                app.chat_state.phase,
+                current.stopped,
+                failed.stopped,
+                tuple(current.discarded_sessions),
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: current.stopped)
+            return result
+
+    (
+        calls,
+        unchanged,
+        messages,
+        phase,
+        current_stopped,
+        candidate_stopped,
+        discarded,
+    ) = asyncio.run(run())
+    assert calls == [(None, True), (None, True)]
+    assert unchanged is True
+    assert messages == ["keep me"]
+    assert phase == RuntimePhase.READY
+    assert current_stopped is False
+    assert candidate_stopped is True
+    assert discarded == ("failed-candidate",)
+
+
+def test_session命令在运行中拒绝且不发送给agent(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "first")
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.RUNNING
+            )
+            await enter_text(pilot, "/clear")
+            await pilot.pause()
+            result = service.submissions[:], app.chat_state.pending_items
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    submissions, pending = asyncio.run(run())
+    assert submissions == ["first"]
+    assert pending == ()
+
+
+def test_session命令带图片时恢复完整草稿(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        image_path = tmp_path / "image.png"
+        image_path.write_bytes(b"image")
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            composer = app.query_one(PersistentComposer)
+            composer.load_text("/resume")
+            image = composer.attach_image(image_path)
+            await pilot.press("enter")
+            await pilot.pause()
+            result = composer.text, composer.images, service.submissions
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result, image
+
+    (text, images, submissions), image = asyncio.run(run())
+    assert text.replace(image.marker, "") == "/resume"
+    assert images == (image,)
+    assert submissions == []
+
+
+@pytest.mark.parametrize(
+    ("target_status", "start_error"),
+    [
+        ({"lifecycle": "running", "active_task_ids": ["target-task"]}, None),
+        ({"lifecycle": "ready"}, RuntimeError("missing Session")),
+    ],
+)
+def test_resume目标失败时保留当前session和conversation(
+    tmp_path, target_status, start_error
+):
+    async def run():
+        current = ControlledService()
+        current.session_id = "current"
+        current.session_status["session_id"] = current.session_id
+        current.session_summaries = (
+            SessionSummaryModel(
+                session_id="target", first_user_input="target question"
+            ),
+        )
+        current.history = SessionHistoryModel(
+            records=(
+                RuntimeUpdateModel(
+                    workspace_key="workspace",
+                    session_id="current",
+                    task_id="current-task",
+                    type="user.message",
+                    payload={"text": "current question", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=1,
+                ),
+            ),
+            history_cursor=1,
+        )
+        target = ControlledService(start_error=start_error)
+        target.session_id = "target"
+        target.session_status.update(target_status)
+        target.session_status["session_id"] = target.session_id
+        app, calls = make_session_app(current, {"target": target}, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/resume")
+            await wait_until(pilot, lambda: isinstance(app.screen, SessionPicker))
+            await pilot.press("enter")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app._session_operation_worker is not None
+                    and app._session_operation_worker.is_finished
+                ),
+            )
+            result = (
+                calls,
+                app.service is current,
+                [item.message_text for item in app.query(UserMessage)],
+                app.chat_state.phase,
+                current.stopped,
+                target.stopped,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: current.stopped)
+            return result
+
+    calls, unchanged, messages, phase, current_stopped, target_stopped = (
+        asyncio.run(run())
+    )
+    assert calls == [(None, True), ("target", False)]
+    assert unchanged is True
+    assert messages == ["current question"]
+    assert phase == RuntimePhase.READY
+    assert current_stopped is False
+    assert target_stopped is True
+
+
+def test_切换后忽略旧subscription迟到的失败消息(tmp_path):
+    async def run():
+        current = ControlledService()
+        current.session_id = "current-empty"
+        current.session_status["session_id"] = current.session_id
+        current.session_summaries = (
+            SessionSummaryModel(
+                session_id="target", first_user_input="target question"
+            ),
+        )
+        old_subscription = current.subscription
+        target = ReconnectingService()
+        target.session_id = "target"
+        target.session_status["session_id"] = target.session_id
+        target.history = SessionHistoryModel(
+            records=(
+                RuntimeUpdateModel(
+                    workspace_key="workspace",
+                    session_id="target",
+                    task_id="target-task",
+                    type="user.message",
+                    payload={"text": "target question", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=1,
+                ),
+            ),
+            history_cursor=1,
+        )
+        app, _ = make_session_app(current, {"target": target}, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/resume")
+            await wait_until(pilot, lambda: isinstance(app.screen, SessionPicker))
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: app.service is target)
+
+            app.post_message(
+                RuntimeSubscriptionFailed(
+                    ConnectionError("old stream closed"), old_subscription
+                )
+            )
+            await pilot.pause()
+            result = (
+                app.service is target,
+                "reconnect" in target.actions,
+                app.chat_state.phase,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: target.stopped)
+            return result
+
+    unchanged, reconnected, phase = asyncio.run(run())
+    assert unchanged is True
+    assert reconnected is False
+    assert phase == RuntimePhase.READY
+
+
 def test_app恢复session退出时的消息工具错误和中断状态(tmp_path):
     async def run():
         service = ControlledService()
@@ -326,8 +991,8 @@ def test_app恢复session退出时的消息工具错误和中断状态(tmp_path)
             await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
             result = (
                 len(app.query(UserMessage)),
-                app.query_one(AssistantMessage).markdown_text,
-                str(app.query_one(ToolMessage).query_one(".tool-state").render()),
+                app.query_one(AssistantProgressBlock).markdown_text,
+                app.query_one(ToolBlock).state_text,
                 len(app.query(ErrorMessage)),
                 str(app.query_one(TurnStatusMessage).render()),
                 app._last_sequence,
@@ -346,7 +1011,289 @@ def test_app恢复session退出时的消息工具错误和中断状态(tmp_path)
     )
 
 
-def test_app历史sequence缺口不进入ready(tmp_path):
+def test_app历史恢复thinking默认折叠并恢复工具追加和最终回答(tmp_path):
+    async def run():
+        service = ControlledService()
+        service.history = SessionHistoryModel(
+            history_cursor=8,
+            records=(
+                _history_update(
+                    1, "user.message", {"text": "hello", "resources": []}
+                ),
+                _history_update(2, "task.started"),
+                _history_update(
+                    3,
+                    "assistant.thinking",
+                    {"step": 1, "text": "reasoning", "partial": False},
+                ),
+                _history_update(
+                    4,
+                    "user.correction",
+                    {"text": "also check errors", "applied_before_step": 2},
+                ),
+                _history_update(
+                    5,
+                    "tool.started",
+                    {
+                        "step": 2,
+                        "call_id": "call",
+                        "tool_name": "bash",
+                        "arguments": {"command": "test"},
+                    },
+                ),
+                _history_update(
+                    6,
+                    "tool.completed",
+                    {
+                        "step": 2,
+                        "call_id": "call",
+                        "tool_name": "bash",
+                        "success": True,
+                        "output_preview": {"stdout": "ok"},
+                        "preview_truncated": False,
+                        "full_result_available": False,
+                        "preview_error": None,
+                    },
+                ),
+                _history_update(
+                    7,
+                    "assistant.message",
+                    {"step": 3, "text": "final answer"},
+                ),
+                _history_update(
+                    8,
+                    "task.finished",
+                    {"status": "completed", "run_id": "run"},
+                ),
+            ),
+        )
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            thinking = app.query_one(ThinkingBlock)
+            tool = app.query_one(ToolBlock)
+            result = (
+                len(app.query(RunCard)),
+                thinking.markdown_text,
+                thinking.expanded,
+                app.query_one(UserCorrectionBlock).correction_text,
+                tool.output_preview,
+                app.query_one(AssistantMessage).markdown_text,
+                app._last_sequence,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    assert asyncio.run(run()) == (
+        1,
+        "reasoning",
+        False,
+        "also check errors",
+        {"stdout": "ok"},
+        "final answer",
+        8,
+    )
+
+
+def test_app_切换会话时清空旧用户轮次轨道(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            await app._apply_action(AppendUserMessage("task-1", "old"))
+            rail = app.query_one(TurnRail)
+            assert "●" in rail.renderable.plain
+            replacement = ControlledService()
+            replacement.history = SessionHistoryModel(records=(), history_cursor=0)
+            await app._activate_session(
+                PreparedSession(replacement, replacement.subscription, replacement.history)
+            )
+            await pilot.pause()
+            return rail.renderable.plain
+
+    assert asyncio.run(run()) == ""
+
+
+def test_app_浏览历史时新回复显示回到最新入口(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            for index in range(30):
+                await app._apply_action(AppendUserMessage(f"task-{index}", f"q {index}"))
+            view = app.query_one(ConversationView)
+            await view.jump_to_turn(0)
+            await app._apply_action(AppendUserMessage("task-30", "new input"))
+            await pilot.pause()
+            indicator = app.query_one("#new-output")
+            visible = indicator.display
+            assert "New messages" in str(indicator.label)
+            assert indicator.region.x >= view.region.right - indicator.region.width - 4
+            indicator.press()
+            await pilot.pause()
+            return visible, view.mounted_turn_range, indicator.display
+
+    visible, mounted, remaining = asyncio.run(run())
+    assert visible is True
+    assert mounted[1] == 31
+    assert remaining is False
+
+
+def test_app_当前窗口内上翻后新回复仍提示回到最新(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 20)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            for index in range(6):
+                await app._apply_action(AppendUserMessage(f"task-{index}", f"q {index}"))
+                await app._apply_action(CompleteAssistantMessage(f"task-{index}", "response " * 40))
+            view = app.query_one(ConversationView)
+            view.page_up()
+            await pilot.pause()
+            assert view._detached_window is False
+            await app._apply_action(AppendAssistantDelta("task-5", " new", step=2))
+            await pilot.pause()
+            return app.query_one("#new-output").display
+
+    assert asyncio.run(run()) is True
+
+
+def test_app_仅上翻历史不会显示回到最新提示(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 20)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            for index in range(6):
+                await app._apply_action(AppendUserMessage(f"task-{index}", f"q {index}"))
+                await app._apply_action(CompleteAssistantMessage(f"task-{index}", "response " * 40))
+            view = app.query_one(ConversationView)
+            view.page_up()
+            await pilot.pause()
+            return view.following_live_tail, app.query_one("#new-output").display
+
+    assert asyncio.run(run()) == (False, False)
+
+
+def test_app_手动滚回最新内容后回到最新提示自动消失(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 20)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            for index in range(6):
+                await app._apply_action(AppendUserMessage(f"task-{index}", f"q {index}"))
+                await app._apply_action(CompleteAssistantMessage(f"task-{index}", "response " * 40))
+            view = app.query_one(ConversationView)
+            view.page_up()
+            await pilot.pause()
+            await app._apply_action(AppendAssistantDelta("task-5", " new", step=2))
+            await pilot.pause()
+            assert app.query_one("#new-output").display is True
+            for _ in range(30):
+                if view.is_vertical_scroll_end:
+                    break
+                view.page_down()
+                await pilot.pause()
+            await pilot.pause()
+            return view.is_vertical_scroll_end, app.query_one("#new-output").display
+
+    at_end, visible = asyncio.run(run())
+    assert at_end is True
+    assert visible is False
+
+
+def test_app_滚回最新内容后新输出继续自动跟随(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 20)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            for index in range(6):
+                await app._apply_action(AppendUserMessage(f"task-{index}", f"q {index}"))
+                await app._apply_action(CompleteAssistantMessage(f"task-{index}", "response " * 40))
+            view = app.query_one(ConversationView)
+            view.page_up()
+            await pilot.pause()
+            await app._apply_action(AppendAssistantDelta("task-5", " new", step=2))
+            await pilot.pause()
+            for _ in range(30):
+                if view.is_vertical_scroll_end:
+                    break
+                view.page_down()
+                await pilot.pause()
+            await app._apply_action(AppendAssistantDelta("task-5", " more", step=2))
+            await pilot.pause()
+            return view.is_vertical_scroll_end, app.query_one("#new-output").display
+
+    assert asyncio.run(run()) == (True, False)
+
+
+def test_app恢复历史后轨道选择最后一轮且未展示中途挂载(tmp_path, monkeypatch):
+    async def run():
+        service = ControlledService()
+        records = []
+        for index in range(30):
+            records.extend((
+                RuntimeUpdateModel(
+                    workspace_key="workspace", session_id="test-session",
+                    task_id=f"history-{index}", type="user.message",
+                    payload={"text": f"question {index}", "resources": []},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=2 * index + 1,
+                ),
+                RuntimeUpdateModel(
+                    workspace_key="workspace", session_id="test-session",
+                    task_id=f"history-{index}", type="assistant.message",
+                    payload={"step": 1, "text": f"answer {index}"},
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=2 * index + 2,
+                ),
+            ))
+        service.history = SessionHistoryModel(
+            records=tuple(records), history_cursor=len(records)
+        )
+        visible_during_mount = []
+        original_mount = ConversationView._mount_unit
+
+        async def observe_mount(self, unit):
+            visible_during_mount.append(
+                self.display and self.styles.visibility == "visible"
+            )
+            return await original_mount(self, unit)
+
+        monkeypatch.setattr(ConversationView, "_mount_unit", observe_mount)
+        app = make_app(service, tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            await pilot.pause()
+            rail = app.query_one(TurnRail)
+            conversation = app.query_one(ConversationView)
+            result = (
+                rail.current, rail.window_start,
+                conversation.mounted_turn_range,
+                conversation.scroll_y == conversation.max_scroll_y,
+                visible_during_mount,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    current, start, mounted, at_bottom, visible = asyncio.run(run())
+    assert current == 29
+    assert start == 20
+    assert mounted == (6, 30)
+    assert at_bottom is True
+    assert visible and not any(visible)
+
+
+def test_app聚合历史允许sequence跳号(tmp_path):
     async def run():
         service = ControlledService()
         service.history = SessionHistoryModel(
@@ -357,13 +1304,16 @@ def test_app历史sequence缺口不进入ready(tmp_path):
         )
         app = make_app(service, tmp_path)
         async with app.run_test() as pilot:
-            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.FAILED)
-            result = str(app.query_one(RuntimeStatusBar).render())
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            result = (
+                app.query_one(UserMessage).message_text,
+                app._last_sequence,
+            )
             app.request_shutdown(return_code=0)
             await wait_until(pilot, lambda: service.stopped)
             return result
 
-    assert "sequence gap" in asyncio.run(run())
+    assert asyncio.run(run()) == ("gap", 2)
 
 
 def test_app历史在隐藏conversation和batch中完整构建后一次显示(
@@ -409,7 +1359,7 @@ def test_app历史在隐藏conversation和batch中完整构建后一次显示(
             result = (
                 tuple(observed),
                 conversation.display,
-                app.query_one(AssistantMessage).markdown_text,
+                app.query_one(AssistantProgressBlock).markdown_text,
             )
             app.request_shutdown(return_code=0)
             await wait_until(pilot, lambda: service.stopped)
@@ -521,7 +1471,44 @@ def test_ctrl_v图片生成marker并向runtime提交映射和路径(
     assert image_path.exists() is False
 
 
+@pytest.mark.parametrize("trigger", ["right_click", "ctrl_v"])
+def test系统剪贴板文本只插入一次且不提交(monkeypatch, tmp_path, trigger):
+    caller_threads = []
+
+    def read_text():
+        caller_threads.append(threading.get_ident())
+        return "中文\n第二行"
+
+    monkeypatch.setattr("apps.tui.src.app.read_clipboard_image", lambda: None)
+    monkeypatch.setattr("apps.tui.src.app.read_clipboard_text", read_text)
+
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            composer = app.query_one(PersistentComposer)
+            composer.load_text("草稿")
+            composer.move_cursor(composer.document.end)
+            app.copy_to_clipboard("stale internal clipboard")
+            if trigger == "right_click":
+                await pilot.click(composer, button=3)
+            else:
+                await pilot.press("ctrl+v")
+            await wait_until(pilot, lambda: composer.text == "草稿中文\n第二行")
+            await pilot.pause()
+            assert composer.text == "草稿中文\n第二行"
+            assert app.chat_state.phase == RuntimePhase.READY
+            assert len(caller_threads) == 1
+            assert caller_threads[0] != threading.get_ident()
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+
+    asyncio.run(run())
+
+
 def test_ctrl_v没有图片时回退textual文本剪贴板(monkeypatch, tmp_path):
+    monkeypatch.setattr("apps.tui.src.app.read_clipboard_text", lambda: None)
     monkeypatch.setattr(
         "apps.tui.src.app.read_clipboard_image", lambda: None
     )
@@ -664,7 +1651,8 @@ def test图片提交失败后ctrl_c恢复文字和附件(monkeypatch, tmp_path):
 
 def test_factory失败前保持静默且提交后保留队首并显示错误(tmp_path):
     async def run():
-        async def failing_factory():
+        async def failing_factory(session_id, create_if_missing):
+            del session_id, create_if_missing
             raise RuntimeError("factory broken")
 
         app = IcarusTextualApp(
@@ -754,7 +1742,7 @@ def test_subscription运行中失败后忽略迟到终态且不调度队首(tmp_
                 pilot, lambda: app.chat_state.phase == RuntimePhase.READY
             )
             await enter_text(pilot, "active")
-            await enter_text(pilot, "must stay queued")
+            app.chat_state.enqueue("must stay queued")
             app.post_message(
                 RuntimeSubscriptionFailed(RuntimeError("stream exploded"))
             )
@@ -813,7 +1801,7 @@ def test_subscription断线后重连并保留运行中task(tmp_path):
     assert "Reconnected" in status
 
 
-def test运行中输入按FIFO排队并在finish后每次只提交一条(tmp_path):
+def test运行中输入默认追加到当前task而不创建新task(tmp_path):
     async def run():
         service = ControlledService()
         app = make_app(service, tmp_path)
@@ -825,36 +1813,290 @@ def test运行中输入按FIFO排队并在finish后每次只提交一条(tmp_pat
             await enter_text(pilot, "second")
             await enter_text(pilot, "third")
             assert service.submissions == ["first"]
-            assert app.chat_state.pending_items == ("second", "third")
-            assert app.query_one(QueuePanel).items == ("second", "third")
+            assert [item[1] for item in service.steers] == ["second", "third"]
+            assert app.chat_state.pending_items == ()
+            assert app.query_one(QueuePanel).items == ()
 
             service.subscription.publish("user-input", finish_event("task-1"))
-            await wait_until(pilot, lambda: len(service.submissions) == 2)
-            after_first = (
+            await wait_until(pilot, lambda: app.chat_state.active_task_id is None)
+            result = (
                 tuple(service.submissions),
-                app.chat_state.pending_items,
-                app.chat_state.active_task_id,
-            )
-
-            service.subscription.publish("user-input", finish_event("task-2"))
-            await wait_until(pilot, lambda: len(service.submissions) == 3)
-            after_second = (
-                tuple(service.submissions),
+                tuple(service.steers),
                 app.chat_state.pending_items,
                 app.chat_state.active_task_id,
             )
             app.request_shutdown(return_code=0)
             await wait_until(pilot, lambda: service.stopped)
-            return after_first, after_second
+            return result
 
-    after_first, after_second = asyncio.run(run())
+    submissions, steers, pending, active = asyncio.run(run())
 
-    assert after_first == (("first", "second"), ("third",), "task-2")
-    assert after_second == (
-        ("first", "second", "third"),
+    assert submissions == ("first",)
+    assert [item[0] for item in steers] == ["task-1", "task-1"]
+    assert pending == ()
+    assert active is None
+
+
+def test运行中输入全部经过fifo队列且steer使用稳定submission_id(tmp_path):
+    async def run():
+        service = BlockingSteerService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "first")
+            await enter_text(pilot, "second")
+            await service.steer_entered.wait()
+            await enter_text(pilot, "third")
+            queued_while_sending = app.query_one(QueuePanel).items
+            locked_id = app.chat_state.dispatch_reservation.message.submission_id
+            service.steer_release.set()
+            await wait_until(pilot, lambda: len(service.steers) == 2)
+            result = (
+                queued_while_sending,
+                tuple(item[1] for item in service.steers),
+                service.steer_attempt_ids[0],
+                locked_id,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    queued, steers, sent_id, locked_id = asyncio.run(run())
+    assert queued == ("second", "third")
+    assert steers == ("second", "third")
+    assert sent_id == locked_id
+
+
+def test_steer传输失败重连后以相同目标和submission_id重试(tmp_path):
+    async def run():
+        service = RetryingSteerService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "first")
+            await enter_text(pilot, "correction")
+            await wait_until(pilot, lambda: len(service.steer_attempts) == 2)
+            result = (
+                tuple(service.steer_attempts),
+                tuple(item[1] for item in service.steers),
+                app.chat_state.pending_items,
+                service.actions.count("reconnect"),
+                app._connection_epoch,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    attempts, accepted, pending, reconnects, epoch = asyncio.run(run())
+    assert attempts[0] == attempts[1]
+    assert accepted == ("correction",)
+    assert pending == ()
+    assert reconnects == 1
+    assert epoch == 2
+
+
+def test_订阅先重连后旧steer才失败仍立即精确重试(tmp_path):
+    async def run():
+        service = LateTransportSteerService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "first")
+            await enter_text(pilot, "correction")
+            await service.first_steer_entered.wait()
+            app.post_message(
+                RuntimeSubscriptionFailed(ConnectionError("stream lost"))
+            )
+            await wait_until(pilot, lambda: app._connection_epoch == 2)
+            service.first_steer_release.set()
+            await wait_until(pilot, lambda: len(service.steer_attempts) == 2)
+            result = (
+                tuple(service.steer_attempts),
+                app.chat_state.pending_items,
+                service.actions.count("reconnect"),
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    attempts, pending, reconnects = asyncio.run(run())
+    assert attempts[0] == attempts[1]
+    assert pending == ()
+    assert reconnects == 1
+
+
+def test_确定性资源拒绝阻塞队首并允许ctrl_c恢复编辑(tmp_path):
+    async def run():
+        service = ControlledService(
+            steer_error=GatewayClientError(
+                "invalid_resource", "Resource is invalid"
+            )
+        )
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "first")
+            await enter_text(pilot, "fix attachment")
+            await wait_until(
+                pilot,
+                lambda: app.chat_state.blocked_submission_id is not None,
+            )
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            composer = app.query_one(PersistentComposer)
+            result = (
+                composer.text,
+                app.chat_state.pending_items,
+                app.chat_state.blocked_submission_id,
+                app.chat_state.phase,
+            )
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    assert asyncio.run(run()) == (
+        "fix attachment",
         (),
-        "task-3",
+        None,
+        RuntimePhase.RUNNING,
     )
+
+
+def test裸exit和quit作为普通消息而slash_exit退出(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "exit")
+            await enter_text(pilot, "quit")
+            await wait_until(pilot, lambda: len(service.steers) == 1)
+            await enter_text(pilot, "/exit")
+            await wait_until(pilot, lambda: service.stopped)
+            return tuple(service.submissions), tuple(
+                item[1] for item in service.steers
+            )
+
+    assert asyncio.run(run()) == (("exit",), ("quit",))
+
+
+def test未知命令和命令参数恢复原草稿且不发送(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(
+                pilot, lambda: app.chat_state.phase == RuntimePhase.READY
+            )
+            await enter_text(pilot, "/compact now")
+            composer = app.query_one(PersistentComposer)
+            unknown = composer.text
+            composer.clear_draft()
+            await enter_text(pilot, "/clear now")
+            argument_error = composer.text
+            result = unknown, argument_error, tuple(service.submissions)
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    assert asyncio.run(run()) == ("/compact now", "/clear now", ())
+
+
+def test运行中图片steer接受后删除临时文件(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "apps.tui.src.app.read_clipboard_image",
+        lambda: ClipboardImage(b"png-data", "image/png", "png"),
+    )
+
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            await enter_text(pilot, "first")
+            await pilot.press(*"change ", "ctrl+v")
+            composer = app.query_one(PersistentComposer)
+            await wait_until(pilot, lambda: bool(composer.images))
+            image_path = composer.images[0].path
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: bool(service.steers))
+            result = service.steers[0], image_path.exists(), app.chat_state.pending_items
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    steer, exists, pending = asyncio.run(run())
+
+    assert steer[0] == "task-1"
+    assert steer[1].startswith("change [#image1]")
+    assert steer[2][0].resource_id.endswith(".png")
+    assert steer[3] == "change [#image1]"
+    assert exists is False
+    assert pending == ()
+
+
+def test运行中steer遇到已结束task时保留为下一条新task(tmp_path):
+    async def run():
+        service = ControlledService(steer_status="already_finished")
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            await enter_text(pilot, "first")
+            await enter_text(pilot, "next")
+            assert app.chat_state.pending_items == ("next",)
+            service.subscription.publish("user-input", finish_event("task-1"))
+            await wait_until(pilot, lambda: service.submissions == ["first", "next"])
+            result = tuple(service.submissions), app.chat_state.active_task_id
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return result
+
+    assert asyncio.run(run()) == (("first", "next"), "task-2")
+
+
+def test运行中图片steer被拒绝时保留图片直到作为新task接受(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "apps.tui.src.app.read_clipboard_image",
+        lambda: ClipboardImage(b"png-data", "image/png", "png"),
+    )
+
+    async def run():
+        service = ControlledService(steer_status="already_finished")
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            await enter_text(pilot, "first")
+            await pilot.press("ctrl+v")
+            composer = app.query_one(PersistentComposer)
+            await wait_until(pilot, lambda: bool(composer.images))
+            image_path = composer.images[0].path
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: app.chat_state.pending_items == ("[#image1]",))
+            kept_after_rejection = image_path.exists()
+            service.subscription.publish("user-input", finish_event("task-1"))
+            await wait_until(pilot, lambda: len(service.submissions) == 2)
+            deleted_after_submit = not image_path.exists()
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+            return kept_after_rejection, deleted_after_submit, service.submission_images[1]
+
+    kept, deleted, resources = asyncio.run(run())
+
+    assert kept is True
+    assert deleted is True
+    assert resources[0].resource_id.endswith(".png")
 
 
 def test_submit返回前到达queued_event不会被误丢弃(tmp_path):
@@ -928,10 +2170,10 @@ def test_agent输出期间草稿光标和焦点保持不变(tmp_path):
 
             service.subscription.publish(
                 "agent",
-                AgentTextDeltaEvent(
+                runtime_update(
+                    "assistant.text_delta",
                     task_id="task-1",
-                    step=1,
-                    text="**streaming**",
+                    payload={"step": 1, "text": "**streaming**"},
                 ),
             )
             await wait_until(
@@ -960,7 +2202,8 @@ def test_ctrl_c依次清草稿撤回队尾取消任务并在空闲退出(tmp_pat
                 pilot, lambda: app.chat_state.phase == RuntimePhase.READY
             )
             await enter_text(pilot, "first")
-            await enter_text(pilot, "second\nline")
+            app.chat_state.enqueue("second\nline")
+            await app._refresh_queue()
 
             await pilot.press(*"draft", "ctrl+c")
             await pilot.pause()
@@ -1099,16 +2342,12 @@ def test_projector失败进入fatal并保留当前任务队列和草稿(tmp_path
                 pilot, lambda: app.chat_state.phase == RuntimePhase.READY
             )
             await enter_text(pilot, "active")
-            await enter_text(pilot, "keep queued")
+            app.chat_state.enqueue("keep queued")
             composer = app.query_one(PersistentComposer)
             composer.load_text("keep draft")
             service.subscription.publish(
                 "agent",
-                type(
-                    "RuntimeEvent",
-                    (),
-                    {"task_id": "task-1"},
-                )(),
+                runtime_update("agent"),
             )
             await wait_until(
                 pilot, lambda: app.chat_state.phase == RuntimePhase.FAILED
@@ -1151,13 +2390,13 @@ def test_conversation更新失败后忽略后续event且不调度队首(
                 pilot, lambda: app.chat_state.phase == RuntimePhase.READY
             )
             await enter_text(pilot, "active")
-            await enter_text(pilot, "must not dispatch")
+            app.chat_state.enqueue("must not dispatch")
             service.subscription.publish(
                 "agent",
-                AgentTextDeltaEvent(
+                runtime_update(
+                    "assistant.text_delta",
                     task_id="task-1",
-                    step=1,
-                    text="broken update",
+                    payload={"step": 1, "text": "broken update"},
                 ),
             )
             await wait_until(
@@ -1192,8 +2431,8 @@ def test_conversation更新失败后忽略后续event且不调度队首(
 def test_runtime接受后用户消息渲染失败不把消息重新入队(
     monkeypatch, tmp_path
 ):
-    async def fail_user_message(self, text):
-        del self, text
+    async def fail_user_message(self, text, *, task_id=""):
+        del self, text, task_id
         raise RuntimeError("user message exploded")
 
     monkeypatch.setattr(
@@ -1257,14 +2496,7 @@ def test_notification展示失败不阻止同一event完成任务(monkeypatch, t
             monkeypatch.setattr(app, "notify", fail_notification)
             service.subscription.publish(
                 "test-source",
-                type(
-                    "RuntimeEvent",
-                    (),
-                    {
-                        "task_id": "task-1",
-                        "task_id": "task-1",
-                    },
-                )(),
+                runtime_update("test-source"),
             )
             await wait_until(
                 pilot, lambda: app.chat_state.active_task_id is None
@@ -1407,11 +2639,7 @@ def test未知ui_action进入fatal而不是终止textual消息循环(tmp_path):
             await enter_text(pilot, "active")
             service.subscription.publish(
                 "test-source",
-                type(
-                    "RuntimeEvent",
-                    (),
-                    {"task_id": "task-1"},
-                )(),
+                runtime_update("test-source"),
             )
             await wait_until(
                 pilot, lambda: app.chat_state.phase == RuntimePhase.FAILED

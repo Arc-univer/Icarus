@@ -4,7 +4,8 @@
 
 本文记录 Icarus 未来一段时间已经对齐的开发主线、阶段顺序和关键依赖。它是路线图与
 TODO 索引，不替代具体功能的架构设计和实施计划。进入每个阶段前，仍需在对应应用的
-`docs/arch/` 与 `docs/plan/` 中完成设计、评审和任务拆分。
+`docs/spec/YYYY-MM-DD-<feature>/` 中完成设计、评审和任务拆分。架构文档应根据当前源代码与测试
+描述系统，不作为限制源代码演进的反向约束。
 
 详细 TODO：
 
@@ -141,8 +142,8 @@ Knowledge 等位于 Kernel 外部并提供协作能力；Hook 保持底层观测
 
 上述基础能力已经完成。后续异常、日志、配置、安全和资源限制继续由真实调用方驱动加固，不再
 阻塞设备级 Runtime、Gateway 和 Session 产品化。详细设计见
-`apps/agent/docs/arch/agent-core-capability-completion-design.md`，实施结果见
-`apps/agent/docs/plan/agent-core-capability-completion-development-plan.md`。
+`apps/agent/docs/spec/2026-08-27-agent-core-capability-completion/arch.md`，实施结果见
+`apps/agent/docs/spec/2026-08-27-agent-core-capability-completion/plan.md`。
 
 完成标志：新增 Plugin 和 Tool 不需要修改 Kernel 主循环；核心模块边界可以独立理解和测试；
 关键同步、异步与终态行为一致；重构后的文档与实现保持一致。
@@ -168,11 +169,16 @@ Knowledge 等位于 Kernel 外部并提供协作能力；Hook 保持底层观测
 - [ ] 将 Agent 基础层已有的 Usage、Compact、Error Event 和图片引用继续封装为产品可理解的状态
   与交互，不在 UI 中重复实现基础逻辑。TUI 已完成 macOS `Ctrl+V` 图片输入首期闭环；Usage、
   Compact、错误详情、图片历史展示以及 GUI/WebUI 接入仍待完成。
-- [ ] 完善对话元数据、消息历史和索引持久化，支持进程重启后枚举并恢复已有对话。
-- [ ] 增加对话切换的应用层接口和 TUI 交互，明确运行中任务收束、状态保存、Runtime/Blackboard
+- [x] 通过 Agent Application 的 `SessionStore` 持久化 Workspace、Session 元数据和公共
+  Conversation；支持进程重启后枚举、恢复和增量读取，Session/Conversation 以本地数据库为事实源，
+  Plugin State、Asset、Trace 和日志继续保留文件边界。
+- [x] 增加对话切换的应用层接口和 TUI 交互，明确运行中任务收束、状态保存、Runtime/Blackboard
   恢复以及输出订阅和 UI 投影切换。
 - [ ] 覆盖新建、恢复、切换、Compact 展示、错误展示、跨会话图片交互和异常退出的端到端验证；
   当前 TUI 图片草稿、排队、提交和清理已有自动化回归。
+- [ ] 按 `docs/todo/agent-core.md` 的“长对话、Tool 与中断二次收敛”逐项修复真实长会话暴露的
+  Product Conversation 投影、动态 Context 顺序、Tool Result 预算、Wire Context 计量、中断语义、
+  HITL 和副作用恢复问题；这些问题优先于继续扩大对话产品化范围。
 
 依赖顺序：Agent 基础能力先稳定；对话持久化和索引是恢复与切换的前置条件。对话生命周期由
 应用层和 Persistence/Blackboard 协作完成，ReActAgent 继续保持无状态。

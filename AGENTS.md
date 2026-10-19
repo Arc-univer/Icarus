@@ -8,25 +8,36 @@ Keep application-specific code in `apps/<app-name>/`. Introduce shared packages 
 
 ## Architecture
 
-Agent architecture designs are maintained in:
+Application-specific designs and implementation plans are grouped by feature:
 
-- `apps/agent/docs/arch/`
+```text
+apps/<app-name>/docs/spec/YYYY-MM-DD-<feature>/
+├── arch.md
+├── plan.md
+└── plan-<phase-or-purpose>.md
+```
 
-Implementation plans are maintained in:
+Use the date when the feature design first entered Git. For a plan-only spec, use the plan's first
+Git date. Keep the directory name stable after creation. A feature may be arch-only or plan-only
+when no natural counterpart exists; do not create placeholder documents.
 
-- `apps/agent/docs/plan/`
+Use the repository-root `spec/YYYY-MM-DD-<feature>.md` only for an indivisible requirement that
+requires changes in at least two applications. Use the date when the repository-level spec first
+enters Git and keep the filename stable afterward. If a cross-application requirement can be split
+into app-owned parts, keep each part in the corresponding application's docs instead. Do not put a
+single-application spec in the root `spec/`.
 
-Application-specific designs and implementation plans belong to that application:
+Repository-owned infrastructure that does not belong to an application uses
+`docs/spec/YYYY-MM-DD-<feature>/` with the same `arch.md`, `plan.md`, and optional
+`plan-<phase-or-purpose>.md` convention. Root cross-application specs keep only shared
+requirements, boundaries, dependencies, and links to the owning feature documents; do
+not duplicate application implementation details in the root entry.
 
-- `apps/<app-name>/docs/arch/`
-- `apps/<app-name>/docs/plan/`
-
-Use the repository-root `spec/` only for an indivisible requirement that requires changes in at
-least two applications. If a cross-application requirement can be split into app-owned parts, keep
-each part in the corresponding application's docs instead. Do not put a single-application spec in
-the root `spec/`.
-
-Read the relevant design before changing architecture or data flow. When implementation and documentation differ, verify the current code and tests first, then update the corresponding document.
+Architecture documents describe the current source-code architecture and system design. They are
+derived from the implementation and do not constrain how source code may evolve. Before changing or
+writing architecture documentation, inspect the relevant code and tests. When implementation and
+documentation differ, treat the current code and tests as the source of truth, then update the
+corresponding document. Explicit repository rules in this file still apply.
 
 ## Development Red Lines
 
@@ -34,7 +45,7 @@ Read the relevant design before changing architecture or data flow. When impleme
 - Model-vendor differences stay in `model_provider`; upper layers must not branch on OpenAI, Anthropic, or other provider protocols.
 - ReActAgent remains stateless and must not depend on Plugin Runtime, Blackboard, UI, TTS, or domain plugins.
 - Plugin Runtime is generic infrastructure. It routes by source Plugin identity and must not interpret concrete Event types or import domain plugins.
-- Event is the business communication mechanism. Hook is only for persistence, observability, and supervision; Hook must not replace EventBus or change main-flow behavior.
+- Event is the business communication mechanism. Hooks may rewrite values only at declared value-passing points, with explicit priority and validated input/output. Hooks must not trigger downstream plugins, change routing identities, or determine control-flow direction. Recording and logging belong to runtime infrastructure and plugin backends, not Hooks.
 - Blackboard is a Plugin, not the EventBus.
 - AgentPlugin publishes the raw execution stream. Styling, TTS, emotion, action, Skill, Memory, and similar processing belong to independent plugins.
 - Do not implement nested child plugins. Helpers inside a Plugin are ordinary component objects and do not register with PluginRegistry.
@@ -49,8 +60,10 @@ Read the relevant design before changing architecture or data flow. When impleme
 Tests stay inside the corresponding application and mirror the source layer:
 
 ```text
-apps/agent/src/agent_orchestration/plugins/
-apps/agent/test/agent_orchestration/plugins/
+apps/agent/src/agent_app/plugins/
+apps/agent/test/agent_app/plugins/
+apps/agent/src/icarus/
+apps/agent/test/icarus/
 
 apps/tui/
 apps/tui/test/
@@ -65,8 +78,9 @@ Validation order:
 3. compile and diff checks.
 
 ```bash
-apps/agent/.venv/bin/python -m pytest apps/agent/test -q
-apps/agent/.venv/bin/python -m compileall -q apps/agent/src apps/agent/test
+make test-agent
+make test-gateway
+make test-tui
 git diff --check
 ```
 
@@ -74,8 +88,24 @@ Add focused tests for model, Agent, Tool, stream, Event, or Plugin changes. When
 
 Do not fix unrelated failures in a focused change.
 
+## Repository infrastructure
+
+See `CONTRIBUTING.md` for development, dependency, CI, and SDD entry points.
+Development skill references live in `.agents/skills/`; production baseline skill
+sources belong in `skills/`. Neither directory changes runtime discovery automatically.
+App-owned build files, dependencies, locks, and environments stay in the application.
+
 ## Git
 
+- `feat/<app-name>` branches contain application work and target `feature` for integration.
+- Before starting application work, synchronize with the intended remote's `feature`; before
+  opening a PR, verify that the branch contains that baseline and identify the target remote.
+  Do not assume `origin/feature` and `upstream/feature` are the same.
+- `feature` is the development integration branch; `dev` prepares the next release; the production
+  branch holds the deployed release. The current remotes name the production branch `main`
+  (the role also referred to as `master`); verify the actual name instead of creating or renaming it.
+- Promote application work through `feat/<app-name>` -> `feature` -> `dev` -> `main`.
+  These conventions do not authorize automatic merges or other Git mutations.
 - Split commits by logical feature or architectural layer.
 - Keep implementation and its tests together.
 - Keep documentation-only changes separate when practical.

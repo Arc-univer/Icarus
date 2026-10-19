@@ -12,9 +12,12 @@ from uuid import uuid4
 from websockets.asyncio.client import connect
 
 from packages.gateway_protocol import (
+    DiscardEmptySessionResultModel,
     ResourceRefModel,
     RuntimeUpdateModel,
     SessionHistoryModel,
+    SessionListModel,
+    SessionSummaryModel,
 )
 from apps.tui.src.gateway_client.models import (
     SubmitAccepted,
@@ -23,10 +26,18 @@ from apps.tui.src.gateway_client.models import (
 )
 
 
+async def _connect_gateway(url: str):
+    return await connect(url, max_size=16 * 1024 * 1024)
+
+
 class GatewayClientError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class GatewayTransportError(ConnectionError):
+    """The connection ended before an RPC result became authoritative."""
 
 
 class GatewayClient:
@@ -36,11 +47,13 @@ class GatewayClient:
         url: str,
         workspace_path: str | Path,
         session_id: str | None = None,
-        connector: Callable[[str], Awaitable[Any]] = connect,
+        create_if_missing: bool = True,
+        connector: Callable[[str], Awaitable[Any]] = _connect_gateway,
     ) -> None:
         self.url = url
         self.workspace_path = str(Path(workspace_path).expanduser().resolve())
         self.session_id = session_id or uuid4().hex
+        self.create_if_missing = create_if_missing
         self.workspace_key: str | None = None
         self._connector = connector
         self._socket = None
@@ -54,6 +67,7 @@ class GatewayClient:
         if self._socket is not None:
             return
         await self._connect()
+        created_session = False
         try:
             try:
                 session = await self.request(
@@ -64,7 +78,10 @@ class GatewayClient:
                     },
                 )
             except GatewayClientError as error:
-                if error.code != "session_not_found":
+                if (
+                    error.code != "session_not_found"
+                    or not self.create_if_missing
+                ):
                     raise
                 session = await self.request(
                     "session.create",
@@ -73,6 +90,7 @@ class GatewayClient:
                         "session_id": self.session_id,
                     },
                 )
+                created_session = True
             self.session_id = str(session["session_id"])
             self.workspace_key = str(session["workspace_key"])
             await self.request(
@@ -83,6 +101,13 @@ class GatewayClient:
                 },
             )
         except BaseException:
+            if created_session:
+                try:
+                    await self.discard_empty_session(
+                        str(session["session_id"])
+                    )
+                except BaseException:
+                    pass
             await self.close()
             raise
 
@@ -113,16 +138,60 @@ class GatewayClient:
     async def get_session_history(
         self, *, after_sequence: int = 0
     ) -> SessionHistoryModel:
+        records = []
+        next_after_sequence = after_sequence
+        history_cursor = after_sequence
+        while True:
+            result = await self.request(
+                "session.get_history",
+                {
+                    "workspace_path": self.workspace_path,
+                    "session_id": self._require_session_id(),
+                    "after_sequence": next_after_sequence,
+                    "limit": 200,
+                },
+            )
+            history = SessionHistoryModel.model_validate(result)
+            records.extend(history.records)
+            history_cursor = history.history_cursor
+            if not history.has_more:
+                return SessionHistoryModel(
+                    records=tuple(records),
+                    history_cursor=history_cursor,
+                    next_after_sequence=history_cursor,
+                    has_more=False,
+                )
+            if history.next_after_sequence <= next_after_sequence:
+                raise RuntimeError("Session history pagination did not advance")
+            next_after_sequence = history.next_after_sequence
+
+    async def list_sessions(self) -> tuple[SessionSummaryModel, ...]:
         result = await self.request(
-            "session.get_history",
+            "session.list",
+            {"workspace_path": self.workspace_path},
+        )
+        return SessionListModel.model_validate(result).sessions
+
+    async def get_session_status(self) -> dict[str, Any]:
+        return await self.request(
+            "session.get",
             {
                 "workspace_path": self.workspace_path,
                 "session_id": self._require_session_id(),
-                "after_sequence": after_sequence,
             },
         )
-        history = SessionHistoryModel.model_validate(result)
-        return history
+
+    async def discard_empty_session(
+        self, session_id: str
+    ) -> DiscardEmptySessionResultModel:
+        result = await self.request(
+            "session.discard_empty",
+            {
+                "workspace_path": self.workspace_path,
+                "session_id": session_id,
+            },
+        )
+        return DiscardEmptySessionResultModel.model_validate(result)
 
     async def get_task_status(self, task_id: str) -> dict[str, Any]:
         return await self.request(
@@ -181,6 +250,33 @@ class GatewayClient:
             run_id=result.get("run_id"),
         )
 
+    async def steer_task(
+        self,
+        task_id: str,
+        prompt: str,
+        *,
+        submission_id: str,
+        resources: tuple[ResourceRefModel, ...] = (),
+        display_text: str | None = None,
+    ) -> TaskOperationResult:
+        result = await self.request(
+            "session.steer",
+            {
+                "workspace_path": self.workspace_path,
+                "session_id": self._require_session_id(),
+                "task_id": task_id,
+                "prompt": prompt,
+                "display_text": display_text,
+                "submission_id": submission_id,
+                "resources": [item.model_dump(mode="json") for item in resources],
+            },
+        )
+        return TaskOperationResult(
+            task_id=result.get("task_id"),
+            status=str(result["status"]),
+            run_id=result.get("run_id"),
+        )
+
     async def request(self, method: str, params: dict[str, Any]) -> Any:
         socket = self._socket
         if socket is None or self._closed:
@@ -223,6 +319,9 @@ class GatewayClient:
         )
 
     async def _disconnect(self) -> None:
+        self._fail_pending(
+            GatewayTransportError("Gateway connection was replaced")
+        )
         socket = self._socket
         self._socket = None
         if socket is not None:
@@ -263,10 +362,18 @@ class GatewayClient:
         except BaseException as error:
             if not self._closed:
                 self._socket = None
-                for future in tuple(self._pending.values()):
-                    if not future.done():
-                        future.set_exception(error)
-                self._updates.close(error)
+                transport_error = (
+                    error
+                    if isinstance(error, GatewayTransportError)
+                    else GatewayTransportError(str(error))
+                )
+                self._fail_pending(transport_error)
+                self._updates.close(transport_error)
+
+    def _fail_pending(self, error: BaseException) -> None:
+        for future in tuple(self._pending.values()):
+            if not future.done():
+                future.set_exception(error)
 
     def _require_session_id(self) -> str:
         if self.session_id is None:

@@ -3,29 +3,54 @@ from datetime import UTC, datetime
 
 import pytest
 
-from apps.agent.src.agent_orchestration.plugins.user_input import InputAccepted
+from icarus.core.contracts.input import InputAccepted
+from icarus.core.run_control import TaskOperationResult
+from agent_app.application import (
+    DiscardSessionResult,
+    SessionSummary,
+    UnloadResult,
+)
 from apps.gateway.src.protocol.errors import BUSINESS_ERROR, GatewayRpcError
 from apps.gateway.src.protocol.methods import GatewayMethods
-from apps.agent.src.runtime_update import RuntimeUpdate
+from icarus.core.runtime_update import RuntimeUpdate
 
 
 class RuntimeStub:
     is_running = True
 
-    async def create_session(self, workspace_path, session_id=None):
+    def validate_session_instructions(self, instructions):
+        from agent_app.plugins.prompt.composer import validate_instructions
+        validate_instructions(instructions, max_tokens=8192)
+
+    async def create_session(self, workspace_path, session_id=None, *, load_runtime=True, instructions=None):
         self.created = (workspace_path, session_id)
+        self.load_runtime = load_runtime
         return session_id or "generated"
 
-    def get_session_status(self, workspace_path, session_id):
+    async def get_session_status(self, workspace_path, session_id):
         return {
             "workspace_key": "workspace",
             "session_id": session_id,
             "lifecycle": "ready",
         }
 
-    def list_session_statuses(self, workspace_path):
+    async def list_session_summaries(self, workspace_path):
         del workspace_path
-        return ()
+        return (SessionSummary("session", "first message"),)
+
+    async def generate_session_title(self, workspace_path, session_id):
+        self.titled = (workspace_path, session_id)
+        return "生成的标题"
+
+    async def discard_empty_session(self, workspace_path, session_id):
+        self.discarded = (workspace_path, session_id)
+        return DiscardSessionResult(
+            "workspace", session_id, "discarded"
+        )
+
+    async def delete_session(self, workspace_path, session_id):
+        self.deleted = (workspace_path, session_id)
+        return DiscardSessionResult("workspace", session_id, "discarded")
 
     async def submit(
         self,
@@ -62,17 +87,78 @@ class RuntimeStub:
                     occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
                     sequence=1,
                 ),
+                RuntimeUpdate(
+                    workspace_key="workspace",
+                    session_id=session_id,
+                    task_id="task",
+                    type="assistant.thinking",
+                    payload={
+                        "step": 1,
+                        "text": "considered the request",
+                        "partial": False,
+                    },
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=2,
+                ),
+                RuntimeUpdate(
+                    workspace_key="workspace",
+                    session_id=session_id,
+                    task_id="task",
+                    type="tool.completed",
+                    payload={
+                        "step": 1,
+                        "call_id": "call-1",
+                        "tool_name": "read",
+                        "success": True,
+                        "error": None,
+                        "output_preview": {"count": 1},
+                        "preview_truncated": False,
+                        "full_result_available": False,
+                        "preview_error": None,
+                    },
+                    occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    sequence=3,
+                ),
             )
-            if after_sequence < 1
+            if after_sequence < 3
             else (),
-            1,
+            3,
         )
+
+    async def get_session_history_page(self, workspace_path, session_id, *, after_sequence=0, limit=200):
+        from agent_app.application.models.history import HistoryPage
+        records, cursor = await self.get_session_history(workspace_path, session_id, after_sequence=after_sequence)
+        page = records[:limit]
+        return HistoryPage(page, cursor, page[-1].sequence if page else after_sequence, len(records) > len(page))
 
     async def cancel_task(self, *args):
         raise AssertionError(args)
 
+    async def steer_task(
+        self,
+        workspace_path,
+        session_id,
+        task_id,
+        prompt,
+        *,
+        resources,
+        display_text=None,
+        submission_id=None,
+    ):
+        self.steered = (
+            workspace_path,
+            session_id,
+            task_id,
+            prompt,
+            resources,
+            display_text,
+            submission_id,
+        )
+        return TaskOperationResult(task_id=task_id, status="accepted", run_id="run")
+
     async def unload_session(self, *args):
-        raise AssertionError(args)
+        self.unloaded = args
+        return UnloadResult("workspace", args[1], "unloaded")
 
     def get_task_status(self, *args):
         raise KeyError(args)
@@ -132,9 +218,137 @@ def test_gateway_methods读取session历史():
         )
 
     result = asyncio.run(run())
-    assert result["history_cursor"] == 1
+    assert result["history_cursor"] == 3
+    assert result["next_after_sequence"] == 3
+    assert result["has_more"] is False
     assert result["records"][0]["type"] == "user.message"
     assert result["records"][0]["sequence"] == 1
+    assert result["records"][1]["type"] == "assistant.thinking"
+    assert result["records"][1]["payload"] == {
+        "step": 1,
+        "text": "considered the request",
+        "partial": False,
+    }
+    assert result["records"][2]["payload"]["output_preview"] == {
+        "count": 1
+    }
+
+
+def test_gateway_methods沿用session_unload协议关闭后台工作():
+    async def run():
+        runtime = RuntimeStub()
+        result = await GatewayMethods(runtime).dispatch(
+            "session.unload",
+            {"workspace_path": "/workspace", "session_id": "session"},
+            set(),
+        )
+        return runtime, result
+
+    runtime, result = asyncio.run(run())
+    assert result == {
+        "workspace_key": "workspace",
+        "session_id": "session",
+        "status": "unloaded",
+    }
+    assert runtime.unloaded == ("/workspace", "session")
+
+
+def test_gateway_methods将文本和图片steer路由到当前task():
+    async def run():
+        runtime = RuntimeStub()
+        result = await GatewayMethods(runtime).dispatch(
+            "session.steer",
+            {
+                "workspace_path": "/workspace",
+                "session_id": "session",
+                "task_id": "task",
+                "prompt": "look at the image",
+                "display_text": "look [#image1]",
+                "submission_id": "steer-1",
+                "resources": [
+                    {"resource_id": "client/image.png", "media_type": "image/png"}
+                ],
+            },
+            set(),
+        )
+        return runtime, result
+
+    runtime, result = asyncio.run(run())
+
+    assert result == {"task_id": "task", "status": "accepted", "run_id": "run"}
+    assert runtime.steered[0:4] == (
+        "/workspace",
+        "session",
+        "task",
+        "look at the image",
+    )
+    assert runtime.steered[4][0].resource_id == "client/image.png"
+    assert runtime.steered[5] == "look [#image1]"
+    assert runtime.steered[6] == "steer-1"
+
+
+def test_gateway_methods兼容省略steer_submission_id并拒绝空值():
+    async def run():
+        runtime = RuntimeStub()
+        methods = GatewayMethods(runtime)
+        result = await methods.dispatch(
+            "session.steer",
+            {
+                "workspace_path": "/workspace",
+                "session_id": "session",
+                "task_id": "task",
+                "prompt": "continue",
+            },
+            set(),
+        )
+        with pytest.raises(GatewayRpcError) as invalid:
+            await methods.dispatch(
+                "session.steer",
+                {
+                    "workspace_path": "/workspace",
+                    "session_id": "session",
+                    "task_id": "task",
+                    "prompt": "continue",
+                    "submission_id": "  ",
+                },
+                set(),
+            )
+        return runtime, result, invalid.value
+
+    runtime, result, invalid = asyncio.run(run())
+
+    assert result["status"] == "accepted"
+    assert runtime.steered[6] is None
+    assert invalid.code == -32602
+
+
+def test_gateway_methods列出摘要并清理空session():
+    async def run():
+        runtime = RuntimeStub()
+        methods = GatewayMethods(runtime)
+        sessions = await methods.dispatch(
+            "session.list", {"workspace_path": "/workspace"}, set()
+        )
+        discarded = await methods.dispatch(
+            "session.discard_empty",
+            {"workspace_path": "/workspace", "session_id": "session"},
+            set(),
+        )
+        return runtime, sessions, discarded
+
+    runtime, sessions, discarded = asyncio.run(run())
+    assert sessions == {
+        "sessions": [
+            {"session_id": "session", "first_user_input": "first message",
+             "title": None, "created_at": None, "updated_at": None}
+        ]
+    }
+    assert discarded == {
+        "workspace_key": "workspace",
+        "session_id": "session",
+        "status": "discarded",
+    }
+    assert runtime.discarded == ("/workspace", "session")
 
 
 def test_gateway_methods非法参数和业务错误不泄漏内部异常():
@@ -159,3 +373,51 @@ def test_gateway_methods非法参数和业务错误不泄漏内部异常():
     assert unavailable.code == BUSINESS_ERROR
     assert unavailable.data == {"code": "task_status_unavailable"}
     assert "missing" not in unavailable.message
+
+
+def test_memory_context_uses_runtime_and_validates_parameters():
+    class MemoryRuntime:
+        def get_memory_context(self, workspace_path):
+            return {'user_id': 'actual-user', 'agent_id': 'actual-agent', 'run_id': 'global' if workspace_path is None else 'workspace:server-key'}
+
+    async def run():
+        methods = GatewayMethods(MemoryRuntime())
+        result = await methods.dispatch('memory.get_context', {}, set())
+        assert result == {'user_id': 'actual-user', 'agent_id': 'actual-agent', 'run_id': 'global'}
+        result = await methods.dispatch('memory.get_context', {'workspace_path': '/workspace'}, set())
+        assert result['run_id'] == 'workspace:server-key'
+        for params in ({'workspace_path': ''}, {'workspace_path': '   '}, {'secret': True}):
+            with pytest.raises(GatewayRpcError) as error:
+                await methods.dispatch('memory.get_context', params, set())
+            assert error.value.code == -32602
+    asyncio.run(run())
+
+
+def test_gateway_session_delete使用应用接口():
+    runtime = RuntimeStub()
+    result = asyncio.run(GatewayMethods(runtime).dispatch("session.delete", {"workspace_path": "/workspace", "session_id": "conversation"}, set()))
+    assert result == {"workspace_key": "workspace", "session_id": "conversation", "status": "discarded"}
+    assert runtime.deleted == ("/workspace", "conversation")
+
+
+def test_gateway_session_create支持按需加载且默认保持兼容():
+    runtime = RuntimeStub()
+    methods = GatewayMethods(runtime)
+    asyncio.run(methods.dispatch("session.create", {"workspace_path": "/workspace", "session_id": "lazy", "load_runtime": False}, set()))
+    assert runtime.load_runtime is False
+    asyncio.run(methods.dispatch("session.create", {"workspace_path": "/workspace", "session_id": "eager"}, set()))
+    assert runtime.load_runtime is True
+
+def test_gateway_methods_generate_session_title():
+    async def run():
+        runtime = RuntimeStub()
+        methods = GatewayMethods(runtime)
+        result = await methods.dispatch('session.generate_title', {
+            'workspace_path': '/workspace', 'session_id': 'session'
+        }, set())
+        assert runtime.titled == ('/workspace', 'session')
+        assert result == {'title': '生成的标题'}
+        with pytest.raises(GatewayRpcError) as error:
+            await methods.dispatch('session.generate_title', {'workspace_path': '/workspace'}, set())
+        assert error.value.code == -32602
+    asyncio.run(run())

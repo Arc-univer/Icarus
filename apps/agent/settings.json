@@ -6,11 +6,23 @@
     "allow_evolve": false
   },
   "agent": {
-    "max_steps": 256
+    "max_steps": 1024,
+    "tool_execution": {
+      "default_timeout_seconds": 120.0,
+      "default_output_tokens": 3000
+    }
   },
   "runtime": {
     "plugin_dirs": [],
-    "plugin_config": {},
+    "plugin_config": {
+      "memory": {
+        "user_id": "removel",
+        "agent_id": "icarus"
+      },
+      "knowledge": {
+        "knowledge_base": "icarus-project"
+      }
+    },
     "required_plugin_ids": [
       "persistence",
       "builtin-tools",
@@ -18,24 +30,49 @@
       "user-input",
       "skill",
       "blackboard",
-      "runtime-update"
+      "runtime-update",
+      "mcp",
+      "memory",
+      "knowledge",
+      "process"
     ]
   },
-  "model_settings": {
-    "thinking": {
-      "model_name": "deepseek-v4-flash-vision-exp",
-      "context_window": 1000000,
-      "max_tokens": 4096,
-      "temperature": 0.9,
-      "default_think_level": "high"
-    },
-    "perception": {
-      "model_name": "deepseek-v4-flash",
-      "context_window": 1000000,
-      "max_tokens": 4096,
-      "temperature": 0.6,
-      "default_think_level": "high"
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.80",
+        "--headless",
+        "--isolated",
+        "--browser",
+        "chrome"
+      ]
     }
   },
-  "use_protocol": "openai"
+  "model_settings": [
+    {
+      "model_name": "deepseek-flash",
+      "context_window": 1000000,
+      "max_tokens": 9192,
+      "temperature": 0.9,
+      "default_think_level": "high",
+      "name": "thinking"
+    },
+    {
+      "model_name": "deepseek-v4-flash",
+      "context_window": 1000000,
+      "max_tokens": 9192,
+      "temperature": 0.6,
+      "default_think_level": "high",
+      "name": "perception"
+    }
+  ],
+  "use_protocol": "openai",
+  "model_roles": {
+    "agent": "thinking",
+    "compaction": "thinking",
+    "skill_generation": "thinking",
+    "title": "perception"
+  }
 }

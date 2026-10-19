@@ -1,6 +1,8 @@
 import asyncio
 
 from textual.app import App, ComposeResult
+from textual import events
+from textual.document._document import Selection
 
 from apps.tui.src.widgets.composer import PersistentComposer
 from apps.tui.src.submission import DraftImage, PendingMessage
@@ -30,6 +32,45 @@ class ComposerTestApp(App):
     ) -> None:
         del event
         self.image_paste_requests += 1
+
+
+def test右键请求粘贴且保留选区():
+    async def run():
+        app = ComposerTestApp()
+        async with app.run_test() as pilot:
+            composer = app.query_one(PersistentComposer)
+            composer.load_text("你好世界")
+            composer.selection = Selection((0, 1), (0, 3))
+            await pilot.click("#composer", offset=(0, 0), button=3)
+            await pilot.pause()
+            assert app.image_paste_requests == 1
+            assert composer.selection == Selection((0, 1), (0, 3))
+            composer.post_message(events.Paste("中文\n粘贴"))
+            await pilot.pause()
+            assert composer.text == "你中文\n粘贴界"
+            assert app.submissions == []
+            composer.action_undo()
+            assert composer.text == "你好世界"
+            composer.read_only = True
+            await pilot.click("#composer", button=3)
+            await pilot.pause()
+            assert app.image_paste_requests == 1
+
+    asyncio.run(run())
+
+
+def test输入框保留光标闪烁且中文输入后保持位置():
+    async def run():
+        app = ComposerTestApp()
+        async with app.run_test() as pilot:
+            composer = app.query_one(PersistentComposer)
+            await pilot.press("你", "好")
+            assert composer.cursor_blink is True
+            assert composer.text == "你好"
+            assert composer.cursor_location == (0, 2)
+            assert app.cursor_position == composer.cursor_screen_offset
+
+    asyncio.run(run())
 
 
 def run_case(keys):
@@ -130,6 +171,59 @@ def test输入框从单行增长并在八行封顶():
     assert initial_height == 1
     assert three_line_height == 3
     assert capped_height == PersistentComposer.MAX_VISIBLE_LINES
+
+
+def test长单行按视觉软换行增长且提交文本不插入换行():
+    async def run():
+        app = ComposerTestApp()
+        async with app.run_test(size=(30, 20)) as pilot:
+            composer = app.query_one(PersistentComposer)
+            composer.load_text("a" * 70)
+            await pilot.pause()
+            visual_height = composer.region.height
+            wrapped_height = composer.wrapped_document.height
+            text_before_submit = composer.text
+            await pilot.press("enter")
+            await pilot.pause()
+            return (
+                visual_height,
+                wrapped_height,
+                text_before_submit,
+                app.submissions,
+            )
+
+    visual_height, wrapped_height, text, submissions = asyncio.run(run())
+
+    assert wrapped_height > 1
+    assert visual_height == min(
+        wrapped_height, PersistentComposer.MAX_VISIBLE_LINES
+    )
+    assert "\n" not in text
+    assert submissions == [text]
+
+
+def test窗口resize后按新的视觉换行数调整高度():
+    async def run():
+        app = ComposerTestApp()
+        async with app.run_test(size=(80, 20)) as pilot:
+            composer = app.query_one(PersistentComposer)
+            composer.load_text("软换行内容" * 12)
+            await pilot.pause()
+            wide = (composer.region.height, composer.wrapped_document.height)
+            await pilot.resize_terminal(30, 20)
+            await pilot.pause()
+            narrow = (composer.region.height, composer.wrapped_document.height)
+            await pilot.resize_terminal(80, 20)
+            await pilot.pause()
+            restored = (composer.region.height, composer.wrapped_document.height)
+            return wide, narrow, restored, composer.text
+
+    wide, narrow, restored, text = asyncio.run(run())
+
+    assert narrow[1] > wide[1]
+    assert narrow[0] == min(narrow[1], PersistentComposer.MAX_VISIBLE_LINES)
+    assert restored == wide
+    assert "\n" not in text
 
 
 def test_attach_image在光标处插入marker并随提交发送(tmp_path):
