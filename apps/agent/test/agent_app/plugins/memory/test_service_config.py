@@ -21,8 +21,8 @@ def load_module():
 
 def test_mem0_compose使用可见数据目录且运行导入源码():
     config = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert set(config["services"]) == {"mem0"}
     mem0 = config["services"]["mem0"]
-    postgres = config["services"]["postgres"]
     assert "volumes" not in config
     assert "env_file" not in mem0
     assert any(
@@ -33,14 +33,13 @@ def test_mem0_compose使用可见数据目录且运行导入源码():
         "services/mem0/models:/root/.cache/fastembed" in value
         for value in mem0["volumes"]
     )
-    assert (
-        "FASTEMBED_CACHE_PATH=/root/.cache/fastembed"
-        in mem0["environment"]
-    )
-    assert any(
-        "services/mem0/postgres:/var/lib/postgresql/data" in value
-        for value in postgres["volumes"]
-    )
+    environment = "\n".join(mem0["environment"])
+    for key in (
+        "POSTGRES_HOST=", "POSTGRES_PORT=", "POSTGRES_USER=",
+        "POSTGRES_DB=", "POSTGRES_PASSWORD=", "APP_DB_NAME=",
+    ):
+        assert key in environment
+    assert "FASTEMBED_CACHE_PATH=/root/.cache/fastembed" in environment
     assert "force-reinstall" not in mem0["command"]
     assert ".:/app" not in mem0["volumes"]
 
@@ -61,6 +60,12 @@ def test_mem0_compose脚本安全解析env并创建目录(tmp_path, monkeypatch)
         "OPENAI_API_KEY='model$key'\n",
         encoding="utf-8",
     )
+    for key in (
+        "ICARUS_DATA_DIR", "ICARUS_MEM0_POSTGRES_PASSWORD",
+        "ICARUS_MEM0_JWT_SECRET", "ICARUS_MEM0_API_KEY",
+        "ICARUS_MEM0_LLM_API_KEY", "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(module, "__file__", str(script))
     monkeypatch.setattr(
         module.shutil, "which",

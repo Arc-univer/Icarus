@@ -52,6 +52,12 @@ def test_openkb_compose脚本安全解析根env并创建目录(tmp_path, monkeyp
         "OPENAI_API_KEY='model$key'\n",
         encoding="utf-8",
     )
+    for key in (
+        "ICARUS_DATA_DIR", "ICARUS_OPENKB_API_TOKEN",
+        "ICARUS_OPENKB_LLM_API_KEY", "ICARUS_OPENKB_KNOWLEDGE_BASE",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(module, "__file__", str(script))
     monkeypatch.setattr(
         module.shutil, "which",
