@@ -179,3 +179,60 @@ def test_hosted_environment_conflicts_fail_before_launch():
     lifecycle, _, process = make([inside, owner])
     assert lifecycle.start(["owner"]) != 0
     assert not process.calls
+
+
+def test_status_reports_each_row_before_probing_the_next_component():
+    remote_a = Component("a", "app", "remote", "none")
+    remote_b = Component("b", "app", "remote", "none")
+    lifecycle, _, _ = make([remote_a, remote_b])
+    events = []
+
+    def probe(component, environment):
+        events.append(("probe", component.name))
+        return ProbeResult(True, "reachable", "test probe")
+
+    lifecycle.probe = probe
+    rows = lifecycle.status(["a", "b"], on_row=lambda row: events.append(("row", row.component)))
+    assert events == [("probe", "a"), ("row", "a"), ("probe", "b"), ("row", "b")]
+    assert [row.component for row in rows] == ["a", "b"]
+
+
+def test_start_reports_launch_and_readiness_progress():
+    class SlowProcess(Process):
+        def __init__(self):
+            super().__init__()
+            self.ready_checks = 0
+
+        def status(self, component):
+            if component.name not in self.running:
+                return type("State", (), {"state": "stopped", "detail": ""})()
+            self.ready_checks += 1
+            state = "running" if self.ready_checks >= 8 else "starting"
+            return type("State", (), {"state": state, "detail": "not ready"})()
+
+    registry = Registry(1, {"worker": app("worker", default_stack=True)})
+    process = SlowProcess()
+    lines = []
+    lifecycle = Lifecycle(registry, compose=Compose(), process=process,
+                          probe_func=lambda component, environment: ProbeResult(True, "reachable", "test probe"),
+                          output=lines.append, readiness_timeout=5, progress_interval=.05)
+    assert lifecycle.start(["worker"]) == 0
+    assert lines[:2] == ["worker: starting process (-)", "worker: waiting for readiness (-)"]
+    assert lines[-1] == "worker: running (-)"
+    assert any(line.startswith("worker: still waiting for readiness (") for line in lines)
+
+
+def test_stopped_status_does_not_emit_an_empty_detail_segment():
+    class Process:
+        environ = {}
+
+        def effective_component(self, component):
+            return component
+
+        def status(self, component):
+            return type("State", (), {"state": "stopped", "detail": ""})()
+
+    lifecycle = Lifecycle(Registry(1, {"worker": app("worker")}), compose=object(), process=Process())
+    row = lifecycle.status(["worker"])[0]
+    assert row.detail == "-"
+    assert "; ;" not in row.detail

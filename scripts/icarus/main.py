@@ -192,9 +192,12 @@ Operational paths always resolve from the repository. Legacy 'icarus --session-i
         lifecycle = self._runtime(registry, dev=options.dev)
         names = [name] if name else None
         if command == "status":
-            print(f"{'COMPONENT':<18} {'MODE':<8} {'STATE':<12} DETAIL")
-            for row in lifecycle.status(names):
-                print(f"{row.component:<18} {row.mode:<8} {row.state:<12} {row.detail}")
+            print(f"{'COMPONENT':<18} {'MODE':<8} {'STATE':<12} DETAIL", flush=True)
+
+            def emit(row):
+                print(f"{row.component:<18} {row.mode:<8} {row.state:<12} {row.detail}", flush=True)
+
+            lifecycle.status(names, on_row=emit)
             return 0
         if command == "logs":
             if name is None:

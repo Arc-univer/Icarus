@@ -22,11 +22,15 @@ class StatusRow:
     detail: str
 
 
+def _write_line(message):
+    print(message, flush=True)
+
+
 class Lifecycle:
     def __init__(self, registry: Registry, *, compose, process, probe_func=probe,
                  inject_func=build_child_environment, installer=None,
-                 process_args=lambda component: (), output=print,
-                 environment=None, readiness_timeout=180):
+                 process_args=lambda component: (), output=_write_line,
+                 environment=None, readiness_timeout=180, progress_interval=5):
         self.registry = registry
         self.compose = compose
         self.process = process
@@ -37,6 +41,7 @@ class Lifecycle:
         self.output = output
         self.environment = dict(environment if environment is not None else getattr(process, "environ", {}))
         self.readiness_timeout = readiness_timeout
+        self.progress_interval = progress_interval
 
     def owner(self, component):
         while component.mode == "local" and component.provisioning in {"embedded", "bundled"}:
@@ -177,7 +182,8 @@ class Lifecycle:
         address = self.address(component)
         if component.provisioning in {"process", "foreground"}:
             result = self.process.status(component)
-            return StatusRow(component.name, component.mode, result.state, f"{address}; {result.detail}")
+            detail = "; ".join(part for part in (address, result.detail) if part)
+            return StatusRow(component.name, component.mode, result.state, detail)
         if component.provisioning == "compose":
             rows = self.compose.containers(component)
             ready = self.probe(component, self.environment).ok
@@ -196,12 +202,18 @@ class Lifecycle:
         result = self.probe(component, self.environment)
         return StatusRow(component.name, component.mode, result.state, f"{address}; {result.detail}")
 
-    def status(self, names: Sequence[str] | None) -> tuple[StatusRow, ...]:
+    def status(self, names: Sequence[str] | None, *, on_row=None) -> tuple[StatusRow, ...]:
         rows = []
+
+        def record(row):
+            rows.append(row)
+            if on_row is not None:
+                on_row(row)
+
         for name in self.registry.names() if names is None else names:
             component = self.registry.get(name)
             if not component.enabled:
-                rows.append(StatusRow(name, component.mode, "disabled", self.address(component)))
+                record(StatusRow(name, component.mode, "disabled", self.address(component)))
                 continue
             try:
                 row = self._raw_status(component)
@@ -211,15 +223,20 @@ class Lifecycle:
                         blocking = any(required for _, required in failures)
                         detail = "; ".join(("blocked dependency " if required else "optional dependency ") + chain
                                            for chain, required in failures)
+                        label = "degraded; " if blocking else "degraded optional; "
                         row = StatusRow(name, row.mode, "degraded" if row.state in {"running", "external"} else row.state,
-                                        row.detail + "; " + ("degraded; " if blocking else "degraded optional; ") + detail)
-                rows.append(row)
+                                        "; ".join(part for part in (row.detail, label + detail) if part))
+                record(row)
             except (RuntimeError, ValueError, OSError) as error:
-                rows.append(StatusRow(name, component.mode, "unknown", f"{self.address(component)}; {error}; stop/restart with the original launch configuration if identity changed"))
+                record(StatusRow(name, component.mode, "unknown", f"{self.address(component)}; {error}; stop/restart with the original launch configuration if identity changed"))
         return tuple(rows)
 
     def _wait(self, component):
-        deadline = time.monotonic() + self.readiness_timeout
+        self.output(f"{component.name}: waiting for readiness ({self.address(component)})")
+        started = time.monotonic()
+        deadline = started + self.readiness_timeout
+        progress = self.progress_interval if self.progress_interval > 0 else None
+        next_progress = started + progress if progress is not None else None
         while True:
             row = self._raw_status(component)
             if row.state in {"running", "external", "reachable"}:
@@ -229,7 +246,12 @@ class Lifecycle:
                     return
             if component.provisioning == "process" and row.state == "stopped":
                 raise RuntimeError(f"{component.name}: exited before readiness; inspect logs")
-            if time.monotonic() >= deadline:
+            now = time.monotonic()
+            if next_progress is not None and now >= next_progress:
+                self.output(f"{component.name}: still waiting for readiness ({now - started:.0f}s)")
+                while next_progress <= now:
+                    next_progress += progress
+            if now >= deadline:
                 raise RuntimeError(f"{component.name}: readiness timeout; inspect status/logs")
             time.sleep(.1)
 
@@ -283,11 +305,13 @@ class Lifecycle:
                         if row.state != "starting":
                             if self._port_open(component):
                                 raise RuntimeError(f"{name}: port in use by an unrecognized service; refusing start")
+                            self.output(f"{name}: starting {component.provisioning} ({self.address(component)})")
                             self.process.spawn(component, self.process_args(component), environment=environment)
                     elif component.provisioning == "compose":
                         if row.state != "starting":
                             if self._port_open(component):
                                 raise RuntimeError(f"{name}: port in use by an unrecognized service; refusing start")
+                            self.output(f"{name}: starting {component.provisioning} ({self.address(component)})")
                             self.compose.up(component, environment)
                     elif component.provisioning != "none":
                         raise RuntimeError(f"{name}: unsupported start provisioning")
@@ -307,6 +331,7 @@ class Lifecycle:
                 if any(required for _, required in issues):
                     failed = True
                     continue
+                self.output(f"{component.name}: opening foreground ({self.address(component)})")
                 result = self.run_foreground(component, self.process_args(component))
                 failed |= result != 0
             except (RuntimeError, ValueError, OSError) as error:
