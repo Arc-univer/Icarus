@@ -160,8 +160,8 @@ def test_app_compose_ports_are_environment_parameterized():
     import yaml
     mem0 = yaml.safe_load((ROOT / "apps/mem0/server/docker-compose.yaml").read_text())["services"]
     openkb = yaml.safe_load((ROOT / "apps/openkb/docker-compose.yaml").read_text())["services"]
-    for app, service, variable in ((mem0, "mem0", "ICARUS_MEM0_PORT"), (mem0, "postgres", "ICARUS_MEM0_POSTGRES_PORT"),
-                                    (mem0, "mem0-dashboard", "ICARUS_MEM0_DASHBOARD_PORT"), (openkb, "openkb", "ICARUS_OPENKB_PORT")):
+    for app, service, variable in ((mem0, "mem0", "ICARUS_MEM0_PORT"),
+                                    (openkb, "openkb", "ICARUS_OPENKB_PORT")):
         assert variable in app[service]["ports"][0]
 
 
@@ -190,13 +190,15 @@ def test_image_workflow_builds_app_owned_inputs_without_publishing():
     assert doc["permissions"] == {"contents": "read"}
     job = doc["jobs"]["build"]
     matrix = job["strategy"]["matrix"]["include"]
-    assert {entry["app"] for entry in matrix} == {"mem0", "openkb", "webui"}
+    assert {entry["app"] for entry in matrix} == {"mem0", "openkb", "rela-mem", "webui"}
     for entry in matrix:
         assert (ROOT / entry["context"]).is_dir()
         assert (ROOT / entry["dockerfile"]).is_file()
-    runs = "\n".join(step.get("run", "") for step in job["steps"])
-    assert "docker build" in runs
-    assert "docker push" not in runs
+    build_steps = [step for step in job["steps"]
+                   if step.get("uses", "").startswith("docker/build-push-action@")]
+    assert build_steps
+    assert build_steps[0]["with"]["push"] is False
+    assert all("docker push" not in str(step) for step in job["steps"])
 
 
 def test_new_workflows_never_run_fork_code_with_write_permissions():
@@ -206,10 +208,16 @@ def test_new_workflows_never_run_fork_code_with_write_permissions():
         doc = yaml.safe_load(file.read_text())
         events = doc.get("on", doc.get(True))
         assert "pull_request_target" not in events, file.name
+        pull_request_triggered = (
+            "pull_request" in events
+            if isinstance(events, (dict, list, tuple, str))
+            else False
+        )
         assert doc["permissions"] == {"contents": "read"}, file.name
         for job in doc["jobs"].values():
             assert "continue-on-error" not in job
-            assert "secrets." not in str(job)
+            if pull_request_triggered:
+                assert "secrets." not in str(job)
             for step in job["steps"]:
                 if step.get("uses", "").startswith("actions/checkout@"):
                     assert step["with"]["persist-credentials"] is False

@@ -81,25 +81,12 @@ endpoint_env = "ICARUS_MEM0_ENDPOINT"
 compose = "apps/mem0/server/docker-compose.yaml"
 compose_project = "mem0-dev"
 compose_command = ["bash", "apps/mem0/scripts/icarus-compose.sh"]
-expected_containers = 3
+expected_containers = 1
 data_dir = "services/mem0"
 dev_install_command = ["bash", "{repo_root}/apps/mem0/scripts/install.sh", "--dev"]
 probe = { type = "http", path = "/docs" }
-# Dashboard is part of the same three-container owner, not a separately managed runtime.
-env = { ICARUS_MEM0_DASHBOARD_PORT = 3000 }
+# The external PostgreSQL/pgvector endpoint is required; no bundled database is shipped.
 secret_env = { ICARUS_MEM0_POSTGRES_PASSWORD = "ICARUS_MEM0_POSTGRES_PASSWORD", ICARUS_MEM0_JWT_SECRET = "ICARUS_MEM0_JWT_SECRET" }
-[components.mem0.requires.mem0-postgres]
-required = true
-
-[components.mem0-postgres]
-kind = "middleware"
-provisioning = "bundled"
-owner = "mem0"
-host = "127.0.0.1"
-port = 8432
-host_env = "ICARUS_MEM0_POSTGRES_BIND_HOST"
-port_env = "ICARUS_MEM0_POSTGRES_PORT"
-probe = { type = "tcp" }
 
 [components.openkb]
 kind = "app"

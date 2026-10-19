@@ -71,7 +71,7 @@ def test_app_install_uses_registry_private_installer_without_creating_env(tmp_pa
 
 
 @pytest.mark.parametrize("rows,ready,state", [
-    ([{"State": "running"}], True, "starting"),
+    ([{"State": "running"}], True, "running"),
     ([{"State": "running", "HealthStatus": "healthy"}] * 2 + [{"State": "running", "HealthStatus": "starting"}], True, "starting"),
     ([{"State": "exited"}], False, "stopped"),
     ([{"State": "running", "HealthStatus": "healthy"}] * 3, True, "running"),

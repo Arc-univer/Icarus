@@ -2,6 +2,11 @@
 .env
 **/.env
 **/.env.*
+**/*.env
+**/*.pem
+**/*.key
+**/settings.json
+**/*.local.*
 .git
 **/__pycache__/
 **/*.pyc
@@ -21,3 +26,12 @@ server/history/
 **/db/
 **/*.egg-info/
 test-results/
+server/dashboard/
+server/dev.Dockerfile
+server/Dockerfile
+server/docker-compose.yaml
+server/init-db.sh
+server/README.md
+scripts/
+tests/
+docs/

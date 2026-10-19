@@ -4,16 +4,19 @@ Runtime uses [docker-compose.yaml](docker-compose.yaml) and [dev.Dockerfile](dev
 from the application-owned source. Start/stop/status through `icarus` from the repository
 root, rather than the removed upstream Makefile, production image, or local env template.
 
-The first cleanup keeps the REST API (`http://127.0.0.1:8888/docs`), PostgreSQL/pgvector,
-and dashboard (`http://127.0.0.1:3000`). Auth, API-key management, rate limits, telemetry,
-and Alembic database migrations remain backend capabilities, even when UI changes later.
-Runtime config and credentials come from the root `.env`; secrets are never committed.
-Data lives under `$ICARUS_DATA_DIR/services/mem0`, including postgres/history/models/backups.
-Stopping containers does not remove it. Back up data before database upgrades or recovery.
+The runtime is API-only (`http://127.0.0.1:8888/docs`). The dashboard and bundled
+PostgreSQL were removed from the Compose file; Mem0 connects to an external
+PostgreSQL/pgvector endpoint configured by `ICARUS_MEM0_POSTGRES_*`. Auth, API-key
+management, rate limits, telemetry, and Alembic database migrations remain backend
+capabilities. Runtime config and credentials come from the root `.env`; secrets are
+never committed. Durable local state lives under `$ICARUS_DATA_DIR/services/mem0`
+(history, models, backups); the application database lives on the external host.
+Stopping containers does not remove the local data. Back up data before database
+upgrades or recovery.
 
 ## Operations
 
-These scripts are not dashboard-only assets and remain available inside the API service:
+These scripts remain available inside the API service:
 
 ```bash
 # From the Icarus repository root, with the service already running:

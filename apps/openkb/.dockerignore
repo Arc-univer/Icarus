@@ -2,6 +2,9 @@
 .env
 **/.env
 **/.env.*
+**/*.pem
+**/*.key
+**/*.local.*
 .git
 **/__pycache__/
 **/*.pyc
