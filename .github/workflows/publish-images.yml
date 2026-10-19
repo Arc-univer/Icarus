@@ -84,11 +84,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Merge platform images
-        env:
-          VERSION: ${{ env.VERSION }}
         run: |
           set -euo pipefail
-          version="${VERSION#v}"
+          version="${{ env.VERSION }}"
+          version="${version#v}"
           for app in webui mem0 openkb rela-mem; do
             docker buildx imagetools create \
               -t "removel/icarus-${app}:${version}" \
