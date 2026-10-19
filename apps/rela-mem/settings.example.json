@@ -4,6 +4,6 @@
     "user": {"person_id": "p_user", "display_name": "我"},
     "agent": {"person_id": "icarus", "display_name": "Icarus"}
   },
-  "falkordb": {"host": "falkordb", "port": 6379, "graph": "rela_mem"},
-  "postgres": {"host": "postgres", "port": 5432, "database": "rela_mem", "user": "rela_mem", "schema": "rela_mem"}
+  "falkordb": {"host": "127.0.0.1", "port": 16379, "graph": "rela_mem"},
+  "postgres": {"host": "127.0.0.1", "port": 15432, "database": "rela_mem", "user": "rela_mem", "schema": "rela_mem"}
 }

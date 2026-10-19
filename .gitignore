@@ -12,6 +12,7 @@ __pycache__/
 
 # Environment
 .env
+icarus.local.toml
 .icarus-data/
 
 # Development caches and generated packages

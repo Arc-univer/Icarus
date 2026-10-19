@@ -32,13 +32,17 @@ def test_compose_configuration_requires_secrets_and_has_isolated_ports(tmp_path)
 
     result = subprocess.run(["docker", "compose", "-f", str(APP / "docker-compose.yaml"), "config", "--format", "json"],
         env=os.environ | {"ICARUS_DATA_DIR": str(tmp_path), "RELA_MEM_API_TOKEN": "test-token",
-                         "RELA_MEM_FALKORDB_PASSWORD": "graph-pw", "RELA_MEM_PG_PASSWORD": "pg-pw"},
+                         "RELA_MEM_FALKORDB_PASSWORD": "graph-pw", "RELA_MEM_PG_PASSWORD": "pg-pw",
+                         "RELA_MEM_PG_HOST": "postgres", "RELA_MEM_PG_PORT": "5432", "RELA_MEM_PG_DATABASE": "rela_mem",
+                         "RELA_MEM_PG_USER": "rela_mem", "RELA_MEM_PG_SCHEMA": "rela_mem", "RELA_MEM_FALKORDB_HOST": "falkordb",
+                         "RELA_MEM_FALKORDB_PORT": "6379", "RELA_MEM_FALKORDB_GRAPH": "rela_mem"},
         capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     import json
     services = json.loads(result.stdout)["services"]
-    assert set(services) == {"rela-mem", "falkordb", "postgres"}
+    assert set(services) == {"rela-mem"}
     assert services["rela-mem"]["ports"][0]["published"] == "8767"
-    assert services["falkordb"]["ports"][0]["published"] == "16379"
-    assert services["postgres"]["ports"][0]["published"] == "15432"
+    assert services["rela-mem"]["environment"]["RELA_MEM_PG_HOST"] == "postgres"
+    assert services["rela-mem"]["environment"]["RELA_MEM_FALKORDB_HOST"] == "falkordb"
+    assert "depends_on" not in services["rela-mem"]
     assert all(v.get("type") == "bind" for s in services.values() for v in s.get("volumes", []))

@@ -72,6 +72,22 @@ class Settings(Config):
         return self
 
 
+def _apply_connection_overrides(data: dict, environ: Mapping[str, str]) -> None:
+    for variable, section, field in (
+        ("RELA_MEM_PG_HOST", "postgres", "host"),
+        ("RELA_MEM_PG_PORT", "postgres", "port"),
+        ("RELA_MEM_PG_DATABASE", "postgres", "database"),
+        ("RELA_MEM_PG_USER", "postgres", "user"),
+        ("RELA_MEM_PG_SCHEMA", "postgres", "schema"),
+        ("RELA_MEM_FALKORDB_HOST", "falkordb", "host"),
+        ("RELA_MEM_FALKORDB_PORT", "falkordb", "port"),
+        ("RELA_MEM_FALKORDB_GRAPH", "falkordb", "graph"),
+    ):
+        if variable in environ:
+            # Keep raw strings for Pydantic's coercion, range checks and sanitized errors.
+            data.setdefault(section, {})[field] = environ[variable]
+
+
 def load_settings(path: str | Path | None = None, environ: Mapping[str, str] | None = None) -> Settings:
     if environ is None:
         source = Path(__file__).resolve()
@@ -86,4 +102,5 @@ def load_settings(path: str | Path | None = None, environ: Mapping[str, str] | N
         graph_password=environ.get("RELA_MEM_FALKORDB_PASSWORD", ""),
         pg_password=environ.get("RELA_MEM_PG_PASSWORD", ""),
     )
+    _apply_connection_overrides(data, environ)
     return Settings.model_validate(data)
