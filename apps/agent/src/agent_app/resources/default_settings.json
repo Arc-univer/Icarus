@@ -17,7 +17,12 @@
     "plugin_config": {
       "prompt": {
         "max_prompt_tokens": 12288,
-        "max_section_tokens": 8192
+        "max_section_tokens": 8192,
+        "required_contributors": ["persona"]
+      },
+      "persona": {
+        "jev_enabled": false,
+        "relationship_enabled": false
       },
       "memory": {
         "user_id": "removel",
@@ -43,7 +48,8 @@
       "mcp",
       "memory",
       "knowledge",
-      "process"
+      "process",
+      "persona"
     ]
   },
   "mcpServers": {

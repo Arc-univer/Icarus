@@ -135,6 +135,10 @@ class SessionRuntime(SessionHost):
                 "memory": {
                     **config.runtime.plugin_config.get("memory", {}),
                 },
+                "persona": {
+                    **config.runtime.plugin_config.get("persona", {}),
+                    "config_model": config,
+                },
                 "knowledge": {
                     **config.runtime.plugin_config.get("knowledge", {}),
                     "default_page_size": (

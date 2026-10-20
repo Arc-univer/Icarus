@@ -28,8 +28,23 @@ def test_installed_discovery_keeps_plugins_lazy(tmp_path):
     assert isolated_code(tmp_path,
         "import sys; from icarus.runtime.discovery import PluginManifestDiscovery; "
         "result=PluginManifestDiscovery(builtin_package='agent_app.plugins').discover(); "
-        "assert len(result.plugins)==13; "
+        "assert len(result.plugins)==14;"
         "assert not any(n.startswith('agent_app.plugins.') for n in sys.modules); print('lazy')") == "lazy"
+
+
+def test_installed_package_exposes_default_persona_resource(tmp_path):
+    assert isolated_code(tmp_path,
+        "from importlib.resources import files; "
+        "p=files('agent_app.resources').joinpath('personas/default/persona.md'); "
+        "assert '## soul' in p.read_text(); print('persona')") == "persona"
+
+
+def test_typesafe_sdk_importable(tmp_path):
+    assert isolated_code(tmp_path,
+        "from importlib.metadata import version; from packaging.version import Version; "
+        "from typesafe_sdk import AsyncTypeSafeClient, Noul, Score; "
+        "assert Version('0.7.2') <= Version(version('typesafe-sdk')) < Version('0.8'); "
+        "print('judge')") == "judge"
 
 
 def test_framework_import_does_not_load_vendor_or_application(tmp_path):

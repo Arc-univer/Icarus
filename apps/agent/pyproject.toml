@@ -19,7 +19,7 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "agent_app.plugins" = ["*/manifest.json"]
-"agent_app.resources" = ["*.json"]
+"agent_app.resources" = ["*.json", "personas/*/*.md"]
 
 [tool.mypy]
 mypy_path = "$MYPY_CONFIG_FILE_DIR/src"

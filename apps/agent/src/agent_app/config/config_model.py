@@ -83,6 +83,7 @@ class RuntimeSettings(pydantic.BaseModel):
             "memory",
             "knowledge",
             "process",
+            "persona",
         ]
     )
 
