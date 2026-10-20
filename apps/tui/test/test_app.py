@@ -20,6 +20,11 @@ from apps.tui.src.gateway_client.models import (
 from apps.tui.src.app import (
     IcarusTextualApp,
     PreparedSession,
+    DispatchFinished,
+    RuntimeReconnected,
+    TaskStatusReceived,
+    SessionActivationRequested,
+    RuntimeOutputReceived,
     RuntimeSubscriptionFailed,
 )
 from apps.tui.src.chat_state import RuntimePhase
@@ -2097,6 +2102,337 @@ def test运行中图片steer被拒绝时保留图片直到作为新task接受(
     assert kept is True
     assert deleted is True
     assert resources[0].resource_id.endswith(".png")
+
+
+@pytest.mark.parametrize("handoff", ["queue_refresh", "buffer_render"])
+def test_early_sequence_flush_and_live_updates_share_message_loop(tmp_path, handoff):
+    async def run():
+        buffered = asyncio.Event()
+        rendering = asyncio.Event()
+        release_render = asyncio.Event()
+        live_posted = asyncio.Event()
+        observed = []
+
+        class Service(ControlledService):
+            async def submit(self, prompt, **kwargs):
+                self.submissions.append(prompt)
+                self.subscription.publish("user-input", runtime_update(
+                    "user.message", payload={"text": prompt, "resources": []}
+                ).model_copy(update={"sequence": 146}))
+                await buffered.wait()
+                return SubmitAccepted(task_id="task-1", queue_position=0)
+
+        class App(IcarusTextualApp):
+            CSS_PATH = Path(__file__).resolve().parents[1] / "src/styles.tcss"
+
+            def post_message(self, message):
+                posted = super().post_message(message)
+                if isinstance(message, RuntimeOutputReceived) and message.update.sequence == 147:
+                    live_posted.set()
+                return posted
+
+            async def on_runtime_output_received(self, message):
+                if message.update.sequence == 147:
+                    observed.append("receive-147")
+                await super().on_runtime_output_received(message)
+                if message.update.sequence == 146:
+                    buffered.set()
+
+            async def _refresh_queue(self):
+                if handoff == "queue_refresh" and self.chat_state.active_task_id == "task-1":
+                    observed.append("render-146-start")
+                    rendering.set()
+                    await release_render.wait()
+                    observed.append("render-146-end")
+                return await super()._refresh_queue()
+
+            async def _apply_action(self, action):
+                if (handoff == "buffer_render" and isinstance(action, AppendUserMessage)
+                        and action.text == "race"):
+                    observed.append("render-146-start")
+                    rendering.set()
+                    await release_render.wait()
+                    observed.append("render-146-end")
+                await super()._apply_action(action)
+
+        service = Service()
+        async def factory(session_id, create_if_missing):
+            return service
+        app = App(runtime_factory=factory, workspace_path=tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            app._last_sequence = 145
+            app.chat_state.enqueue("race")
+            app._schedule_dispatch()
+            try:
+                await asyncio.wait_for(rendering.wait(), 2)
+                service.subscription.publish("user-input", runtime_update(
+                    "task.accepted", payload={"queue_position": 0}
+                ).model_copy(update={"sequence": 147}))
+                await asyncio.wait_for(live_posted.wait(), 2)
+                # Let the main message loop run while the renderer is deliberately suspended.
+                await asyncio.sleep(0.05)
+            finally:
+                release_render.set()
+            await wait_until(pilot, lambda: app._fatal_failure or app._last_sequence == 147)
+            result = app._fatal_failure, app._last_sequence, observed, len(app.query(UserMessage))
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+        return result
+
+    fatal, sequence, observed, messages = asyncio.run(run())
+    assert fatal is False
+    assert sequence == 147
+    assert observed.index("render-146-end") < observed.index("receive-147")
+    assert messages == 1
+
+
+def test_reconnect_history_and_live_updates_share_message_loop(tmp_path):
+    async def run():
+        rendering, release_render, live_posted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        observed = []
+
+        class Service(ReconnectingService):
+            async def reconnect(self):
+                self.actions.append("reconnect")
+                # Reusing a subscription is supported by the client protocol.
+                return self.subscription
+
+        class App(IcarusTextualApp):
+            CSS_PATH = Path(__file__).resolve().parents[1] / "src/styles.tcss"
+
+            def post_message(self, message):
+                posted = super().post_message(message)
+                if isinstance(message, RuntimeOutputReceived) and message.update.sequence == 147:
+                    live_posted.set()
+                return posted
+
+            async def on_runtime_output_received(self, message):
+                if message.update.sequence == 147:
+                    observed.append("receive-147")
+                await super().on_runtime_output_received(message)
+
+            async def _apply_action(self, action):
+                if isinstance(action, AppendUserMessage) and action.text == "restored":
+                    observed.append("render-146-start")
+                    rendering.set()
+                    await release_render.wait()
+                    observed.append("render-146-end")
+                await super()._apply_action(action)
+
+        service = Service()
+        async def factory(session_id, create_if_missing):
+            return service
+        app = App(runtime_factory=factory, workspace_path=tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            app._last_sequence = 145
+            service.history = SessionHistoryModel(records=(runtime_update(
+                "user.message", payload={"text": "restored", "resources": []}
+            ).model_copy(update={"sequence": 146}),), history_cursor=146)
+            app.post_message(RuntimeSubscriptionFailed(ConnectionError("lost")))
+            try:
+                await asyncio.wait_for(rendering.wait(), 2)
+                service.subscription.publish("user-input", runtime_update(
+                    "task.accepted", payload={"queue_position": 0}
+                ).model_copy(update={"sequence": 147}))
+                await asyncio.wait_for(live_posted.wait(), 2)
+                await asyncio.sleep(0.05)
+            finally:
+                release_render.set()
+            await wait_until(pilot, lambda: app._last_sequence == 147 or app._fatal_failure)
+            result = app._fatal_failure, app._last_sequence, observed
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+        return result
+
+    fatal, sequence, observed = asyncio.run(run())
+    assert fatal is False
+    assert sequence == 147
+    assert observed.index("render-146-end") < observed.index("receive-147")
+
+
+def test_session_activation_replay_and_live_updates_share_message_loop(tmp_path):
+    async def run():
+        rendering, release_render, live_posted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        observed = []
+        current, replacement = ControlledService(), ControlledService()
+        replacement.session_id = "replacement"
+        replacement.history = SessionHistoryModel(records=(runtime_update(
+            "user.message", payload={"text": "restored-session", "resources": []}
+        ).model_copy(update={"session_id": "replacement", "sequence": 146}),), history_cursor=146)
+
+        class App(IcarusTextualApp):
+            CSS_PATH = Path(__file__).resolve().parents[1] / "src/styles.tcss"
+
+            def post_message(self, message):
+                posted = super().post_message(message)
+                if isinstance(message, RuntimeOutputReceived) and message.update.sequence == 147:
+                    live_posted.set()
+                return posted
+
+            async def _apply_action(self, action):
+                if isinstance(action, AppendUserMessage) and action.text == "restored-session":
+                    observed.append("render-start")
+                    rendering.set()
+                    await release_render.wait()
+                    observed.append("render-end")
+                await super()._apply_action(action)
+
+            async def on_runtime_output_received(self, message):
+                if message.update.sequence == 147:
+                    observed.append("receive-live")
+                await super().on_runtime_output_received(message)
+
+        calls = 0
+        async def factory(session_id, create_if_missing):
+            nonlocal calls
+            calls += 1
+            return current if calls == 1 else replacement
+        app = App(runtime_factory=factory, workspace_path=tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            app._session_has_user_input = True
+            app._run_command(app.command_registry.resolve("/clear"))
+            try:
+                await asyncio.wait_for(rendering.wait(), 2)
+                app.post_message(RuntimeOutputReceived(runtime_update(
+                    "task.accepted", payload={"queue_position": 0}
+                ).model_copy(update={"session_id": "replacement", "sequence": 147})))
+                await asyncio.wait_for(live_posted.wait(), 2)
+                await asyncio.sleep(0.05)
+            finally:
+                release_render.set()
+            await wait_until(pilot, lambda: app._last_sequence == 147 or app._fatal_failure)
+            result = app._fatal_failure, app._last_sequence, observed
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: replacement.stopped)
+        return result
+
+    fatal, sequence, observed = asyncio.run(run())
+    assert fatal is False
+    assert sequence == 147
+    assert observed.index("render-end") < observed.index("receive-live")
+
+
+@pytest.mark.parametrize("cleanup", ["old_close", "empty_discard", "stale_candidate"])
+def test_session_network_cleanup_does_not_block_message_loop(tmp_path, cleanup):
+    async def run():
+        entered, release, observed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        class Service(ControlledService):
+            async def close(self):
+                if cleanup in {"old_close", "stale_candidate"}:
+                    entered.set()
+                    await release.wait()
+                await super().close()
+
+            async def discard_empty_session(self, session_id):
+                if cleanup == "empty_discard":
+                    entered.set()
+                    await release.wait()
+                return await super().discard_empty_session(session_id)
+
+        current = Service() if cleanup == "old_close" else ControlledService()
+        replacement = Service() if cleanup != "old_close" else ControlledService()
+        replacement.session_id = "replacement"
+        replacement.subscription.queue.put_nowait(runtime_update("session.lifecycle", task_id=None,
+            payload={"state": "ready"}).model_copy(update={"session_id": "replacement"}))
+
+        class App(IcarusTextualApp):
+            CSS_PATH = Path(__file__).resolve().parents[1] / "src/styles.tcss"
+
+            def post_message(self, message):
+                posted = super().post_message(message)
+                if cleanup == "stale_candidate" and isinstance(message, SessionActivationRequested):
+                    self._connection_epoch += 1
+                return posted
+
+            async def on_runtime_output_received(self, message):
+                await super().on_runtime_output_received(message)
+                observed.set()
+
+        async def factory(session_id, create_if_missing):
+            return current
+        app = App(runtime_factory=factory, workspace_path=tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            activation = asyncio.create_task(app._activate_session(
+                PreparedSession(replacement, replacement.subscription, replacement.history)))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                app.post_message(RuntimeOutputReceived(runtime_update("session.lifecycle", task_id=None)))
+                responsive = True
+                try:
+                    await asyncio.wait_for(observed.wait(), 0.2)
+                except TimeoutError:
+                    responsive = False
+            finally:
+                release.set()
+            await asyncio.wait_for(activation, 2)
+            active = app.service is replacement
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: app.service is None)
+        return responsive, active
+
+    responsive, active = asyncio.run(run())
+    assert responsive is True
+    assert active is (cleanup != "stale_candidate")
+
+
+@pytest.mark.parametrize("kind", ["dispatch", "reconnect", "task_status"])
+def test_stale_worker_results_do_not_modify_active_session(tmp_path, kind):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            stale = ControlledService()
+            app.chat_state.enqueue("pending")
+            reservation = app.chat_state.begin_dispatch(app._connection_epoch)
+            app._last_sequence = 145
+            if kind == "dispatch":
+                app.post_message(DispatchFinished(stale, reservation,
+                    result=SubmitAccepted(task_id="wrong", queue_position=0)))
+            elif kind == "reconnect":
+                app.post_message(RuntimeReconnected(service, app._connection_epoch - 1,
+                    ConnectionError("old"), stale.subscription,
+                    SessionHistoryModel(records=(_history_update(146, "user.message", {"text": "stale"}),), history_cursor=146)))
+            else:
+                app.post_message(TaskStatusReceived(service, app._connection_epoch - 1,
+                    "wrong", {"lifecycle": "completed"}))
+            await pilot.pause()
+            result = app._last_sequence, app.chat_state.active_task_id, app.chat_state.pending_items, app._fatal_failure
+            if kind == "reconnect":
+                assert stale.subscription.closed
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+        return result
+    assert asyncio.run(run()) == (145, None, ("pending",), False)
+
+
+def test_live_sequence_duplicates_are_ignored_but_real_gap_is_fatal(tmp_path):
+    async def run():
+        service = ControlledService()
+        app = make_app(service, tmp_path)
+        async with app.run_test() as pilot:
+            await wait_until(pilot, lambda: app.chat_state.phase == RuntimePhase.READY)
+            app._last_sequence = 145
+            update = runtime_update("user.message", payload={"text": "once", "resources": []}).model_copy(update={"sequence": 146})
+            app.post_message(RuntimeOutputReceived(update))
+            app.post_message(RuntimeOutputReceived(update))
+            await wait_until(pilot, lambda: app._last_sequence == 146)
+            await pilot.pause()
+            assert len(app.query(UserMessage)) == 1
+            app.post_message(RuntimeOutputReceived(runtime_update("task.accepted").model_copy(update={"sequence": 148})))
+            await wait_until(pilot, lambda: app._fatal_failure)
+            result = app._last_sequence, app._fatal_message
+            app.request_shutdown(return_code=0)
+            await wait_until(pilot, lambda: service.stopped)
+        return result
+    sequence, error = asyncio.run(run())
+    assert sequence == 146
+    assert "expected=147 actual=148" in error
 
 
 def test_submit返回前到达queued_event不会被误丢弃(tmp_path):

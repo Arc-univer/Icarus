@@ -160,11 +160,36 @@ class RuntimeOutputReceived(Message):
 
 
 @dataclass
+class DispatchFinished(Message):
+    service: RuntimeClient
+    reservation: DispatchReservation
+    result: SubmitAccepted | TaskOperationResult | None = None
+    error: BaseException | None = None
+
+
+@dataclass
 class RuntimeStarted(Message):
     service: RuntimeClient
     subscription: UpdateSubscription
     history: tuple[RuntimeUpdateModel, ...] = ()
     history_cursor: int = 0
+
+
+@dataclass
+class RuntimeReconnected(Message):
+    service: RuntimeClient | None
+    epoch: int
+    cause: BaseException
+    subscription: UpdateSubscription | None = None
+    history: SessionHistoryModel | None = None
+
+
+@dataclass
+class TaskStatusReceived(Message):
+    service: RuntimeClient
+    epoch: int
+    task_id: str
+    status: dict[str, Any]
 
 
 @dataclass
@@ -183,6 +208,14 @@ class PreparedSession:
     service: RuntimeClient
     subscription: UpdateSubscription
     history: SessionHistoryModel
+
+
+@dataclass
+class SessionActivationRequested(Message):
+    prepared: PreparedSession
+    service: RuntimeClient | None
+    epoch: int
+    completed: asyncio.Future[bool]
 
 
 class SessionBusyError(RuntimeError):
@@ -254,7 +287,6 @@ class IcarusTextualApp(App[int]):
         self._event_worker: Worker[Any] | None = None
         self._reconnect_worker: Worker[Any] | None = None
         self._dispatch_worker: Worker[Any] | None = None
-        self._retry_reconnect_requested = False
         self._clipboard_worker: Worker[Any] | None = None
         self._session_operation_worker: Worker[Any] | None = None
         self._clipboard_temp_directory: tempfile.TemporaryDirectory[
@@ -485,15 +517,11 @@ class IcarusTextualApp(App[int]):
             return
         self._schedule_reconnect(message.error)
 
-    def _schedule_reconnect(
-        self, cause: BaseException, *, retry_after_current: bool = False
-    ) -> None:
+    def _schedule_reconnect(self, cause: BaseException) -> None:
         if not self._accepting_input:
             return
         worker = self._reconnect_worker
         if worker is not None and not worker.is_finished:
-            if retry_after_current:
-                self._retry_reconnect_requested = True
             return
         self._reconnect_worker = self.run_worker(
             partial(self._reconnect_runtime, cause),
@@ -505,57 +533,67 @@ class IcarusTextualApp(App[int]):
 
     async def _reconnect_runtime(self, cause: BaseException) -> None:
         service = self.service
+        epoch = self._connection_epoch
         if service is not None:
             try:
-                self._retry_reconnect_requested = False
                 subscription = await service.reconnect()
                 history = await service.get_session_history(
                     after_sequence=self._last_sequence
                 )
-                for update in history.records:
-                    await self._project_runtime_update(
-                        update, historical=True
-                    )
-                self._last_sequence = max(
-                    self._last_sequence, history.history_cursor
-                )
-                active_task_id = self.chat_state.active_task_id
-                self.subscription = subscription
-                self._connection_epoch += 1
-                self._fatal_failure = False
-                self._fatal_message = ""
-                self.chat_state.mark_ready()
-                if active_task_id is not None:
-                    await self._reconcile_task_status(
-                        service, active_task_id
-                    )
-                self._event_worker = self.run_worker(
-                    partial(self._consume_runtime_events, subscription),
-                    name="runtime-events",
-                    group="runtime",
-                    exit_on_error=False,
-                )
-                self._refresh_status("Reconnected")
-                reservation = self.chat_state.dispatch_reservation
-                if reservation is not None and reservation.outcome_unknown:
-                    retry = self.chat_state.begin_dispatch_retry(
-                        reservation, self._connection_epoch
-                    )
-                    await self._send_reservation(retry)
-                    if self._retry_reconnect_requested:
-                        self._retry_reconnect_requested = False
-                        await self._reconnect_runtime(cause)
-                else:
-                    self._schedule_dispatch()
+                self.post_message(RuntimeReconnected(
+                    service, epoch, cause, subscription, history
+                ))
                 return
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Runtime reconnect failed", exc_info=True)
+        self.post_message(RuntimeReconnected(service, epoch, cause))
+
+    async def on_runtime_reconnected(self, message: RuntimeReconnected) -> None:
+        subscription = message.subscription
+        if (not self._accepting_input or message.service is not self.service
+                or message.epoch != self._connection_epoch):
+            if subscription is not None and subscription is not self.subscription:
+                subscription.close()
+            return
+        service = message.service
+        history = message.history
+        if service is not None and subscription is not None and history is not None:
+            for update in history.records:
+                await self._project_runtime_update(update, historical=True)
+                if self._fatal_failure:
+                    return
+            self._last_sequence = max(self._last_sequence, history.history_cursor)
+            active_task_id = self.chat_state.active_task_id
+            old_event_worker = self._event_worker
+            if old_event_worker is not None:
+                old_event_worker.cancel()
+            self.subscription = subscription
+            self._connection_epoch += 1
+            self._fatal_failure = False
+            self._fatal_message = ""
+            self.chat_state.mark_ready()
+            if active_task_id is not None:
+                self._request_task_status(service, active_task_id)
+            self._event_worker = self.run_worker(
+                partial(self._consume_runtime_events, subscription),
+                name="runtime-events",
+                group="runtime",
+                exit_on_error=False,
+            )
+            self._refresh_status("Reconnected")
+            reservation = self.chat_state.dispatch_reservation
+            if reservation is not None and reservation.outcome_unknown:
+                retry = self.chat_state.begin_dispatch_retry(reservation, self._connection_epoch)
+                self._start_reservation_worker(retry)
+            else:
+                self._schedule_dispatch()
+            return
         self._fatal_failure = True
         self.chat_state.mark_failed()
         self._fatal_message = (
-            f"Output stream closed: {type(cause).__name__}: {cause}"
+            f"Output stream closed: {type(message.cause).__name__}: {message.cause}"
         )
         self._refresh_status(self._fatal_message)
         self._safe_notify(
@@ -768,12 +806,54 @@ class IcarusTextualApp(App[int]):
 
     async def _activate_session(self, prepared: PreparedSession) -> None:
         old_service = self.service
+        old_session_id = getattr(old_service, "session_id", None)
+        old_session_was_empty = not self._session_has_user_input
+        completed = asyncio.get_running_loop().create_future()
+        self.post_message(SessionActivationRequested(
+            prepared, old_service, self._connection_epoch, completed
+        ))
+        activated = False
+        try:
+            activated = await completed
+        finally:
+            if self.service is not prepared.service:
+                prepared.subscription.close()
+                await prepared.service.close()
+            elif old_service is not None:
+                try:
+                    await old_service.close()
+                except Exception:
+                    logger.warning("Unable to close previous Session client", exc_info=True)
+        if (activated and old_session_was_empty and old_session_id is not None
+                and old_session_id != prepared.service.session_id):
+            try:
+                await prepared.service.discard_empty_session(old_session_id)
+            except Exception:
+                logger.warning("Unable to discard previous empty Session", exc_info=True)
+
+    async def on_session_activation_requested(self, message: SessionActivationRequested) -> None:
+        if (message.completed.cancelled() or not self._accepting_input
+                or message.service is not self.service
+                or message.epoch != self._connection_epoch):
+            if not message.completed.done():
+                message.completed.set_result(False)
+            return
+        try:
+            activated = await self._apply_prepared_session(message.prepared)
+        except asyncio.CancelledError:
+            if not message.completed.done():
+                message.completed.cancel()
+            raise
+        except Exception as error:
+            if not message.completed.done():
+                message.completed.set_exception(error)
+        else:
+            if not message.completed.done():
+                message.completed.set_result(activated)
+
+    async def _apply_prepared_session(self, prepared: PreparedSession) -> bool:
         old_subscription = self.subscription
         old_event_worker = self._event_worker
-        old_session_id = (
-            old_service.session_id if old_service is not None else None
-        )
-        old_session_was_empty = not self._session_has_user_input
 
         self._event_worker = None
         if old_event_worker is not None:
@@ -854,26 +934,7 @@ class IcarusTextualApp(App[int]):
         except BaseException as error:
             if not self._fatal_failure:
                 self._enter_fatal("Session activation", error)
-        finally:
-            if old_service is not None:
-                try:
-                    await old_service.close()
-                except BaseException:
-                    logger.warning(
-                        "Unable to close previous Session client",
-                        exc_info=True,
-                    )
-        if not activated:
-            return
-        if (
-            old_session_was_empty
-            and old_session_id is not None
-            and old_session_id != prepared.service.session_id
-        ):
-            try:
-                await prepared.service.discard_empty_session(old_session_id)
-            except BaseException:
-                logger.warning("Unable to discard previous empty Session", exc_info=True)
+        return activated
 
     @staticmethod
     def _status_is_idle(status: dict[str, Any]) -> bool:
@@ -1024,19 +1085,33 @@ class IcarusTextualApp(App[int]):
                 )
         except asyncio.CancelledError:
             raise
-        except GatewayTransportError as error:
+        except BaseException as error:
+            self.post_message(DispatchFinished(service, reservation, error=error))
+            return
+        self.post_message(DispatchFinished(service, reservation, result=result))
+
+    async def on_dispatch_finished(self, message: DispatchFinished) -> None:
+        reservation = message.reservation
+        if (not self._accepting_input or self._fatal_failure
+                or message.service is not self.service
+                or self.chat_state.dispatch_reservation is not reservation):
+            return
+        error = message.error
+        if isinstance(error, GatewayTransportError):
             await self._handle_unknown_dispatch(reservation, error)
             return
-        except GatewayClientError as error:
-            await self._handle_dispatch_gateway_error(
-                reservation, error
-            )
+        if isinstance(error, GatewayClientError):
+            await self._handle_dispatch_gateway_error(reservation, error)
             return
-        except BaseException as error:
+        if error is not None:
             self.chat_state.release_dispatch(reservation, fatal=True)
             self._enter_fatal("message dispatch", error)
             return
-
+        result = message.result
+        if result is None:
+            self._enter_fatal("message dispatch", RuntimeError("Dispatch result is missing"))
+            return
+        service = message.service
         if reservation.mode == "steer":
             await self._handle_steer_result(reservation, result)
             return
@@ -1055,13 +1130,7 @@ class IcarusTextualApp(App[int]):
         self._refresh_status("Accepted by runtime")
         await self._flush_early_updates(result.task_id)
         if self.chat_state.active_task_id == result.task_id:
-            try:
-                await self._reconcile_task_status(service, result.task_id)
-            except Exception:
-                logger.debug(
-                    "Unable to reconcile accepted task status",
-                    exc_info=True,
-                )
+            self._request_task_status(service, result.task_id)
         self._schedule_dispatch()
 
     async def _handle_steer_result(
@@ -1082,13 +1151,7 @@ class IcarusTextualApp(App[int]):
             task_id = reservation.task_id
             service = self.service
             if task_id is not None and service is not None:
-                try:
-                    await self._reconcile_task_status(service, task_id)
-                except Exception:
-                    logger.debug(
-                        "Unable to reconcile task after late steer",
-                        exc_info=True,
-                    )
+                self._request_task_status(service, task_id)
             if self.chat_state.phase == RuntimePhase.READY:
                 self._schedule_dispatch()
             return
@@ -1145,9 +1208,9 @@ class IcarusTextualApp(App[int]):
             retry = self.chat_state.begin_dispatch_retry(
                 unknown, self._connection_epoch
             )
-            await self._send_reservation(retry)
+            self._start_reservation_worker(retry)
             return
-        self._schedule_reconnect(error, retry_after_current=True)
+        self._schedule_reconnect(error)
 
     async def on_runtime_output_received(
         self, message: RuntimeOutputReceived
@@ -1294,10 +1357,34 @@ class IcarusTextualApp(App[int]):
             if self._fatal_failure:
                 return
 
+    def _request_task_status(self, service: RuntimeClient, task_id: str) -> None:
+        self.run_worker(
+            partial(self._reconcile_task_status, service, task_id),
+            name="task-status",
+            group="task-status",
+            exit_on_error=False,
+        )
+
     async def _reconcile_task_status(
         self, service: RuntimeClient, task_id: str
     ) -> None:
-        status = await service.get_task_status(task_id)
+        epoch = self._connection_epoch
+        try:
+            status = await service.get_task_status(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Unable to reconcile task status", exc_info=True)
+            return
+        self.post_message(TaskStatusReceived(service, epoch, task_id, status))
+
+    async def on_task_status_received(self, message: TaskStatusReceived) -> None:
+        if (not self._accepting_input or self._fatal_failure
+                or message.service is not self.service
+                or message.epoch != self._connection_epoch
+                or message.task_id != self.chat_state.active_task_id):
+            return
+        service, task_id, status = message.service, message.task_id, message.status
         lifecycle = status.get("lifecycle")
         if lifecycle not in {"completed", "failed", "cancelled"}:
             return
@@ -1416,6 +1503,14 @@ class IcarusTextualApp(App[int]):
             return
         self._dispatch_worker = self.run_worker(
             self._dispatch_next,
+            name="message-dispatch",
+            group="message-dispatch",
+            exit_on_error=False,
+        )
+
+    def _start_reservation_worker(self, reservation: DispatchReservation) -> None:
+        self._dispatch_worker = self.run_worker(
+            partial(self._send_reservation, reservation),
             name="message-dispatch",
             group="message-dispatch",
             exit_on_error=False,
