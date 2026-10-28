@@ -1,7 +1,7 @@
 # Tool Surface Lazy Loading Implementation Plan｜工具面延迟加载实施计划
 
-> 状态：Phase 0 文档交付，Phase 1–4 未实施。
-> 目标架构与已验证现状见 [arch.md](arch.md)；原始设计见
+> 状态：Phase 0–4 的实现与文档已完成；实际验证结果见第 11 节。可选真实模型 smoke 未执行。
+> 目标架构与实施前基线见 [arch.md](arch.md)；原始设计见
 > [eager-scribbling-pony.md](docs/plan/eager-scribbling-pony.md)。
 
 ## 1. Goal and design
@@ -64,17 +64,17 @@ Provider 可插拔、MCP 动态通道独立，以及既有调用方的 `tools=No
 
 ### Steps
 
-- [ ] 先添加 Catalog 查组、常驻排除和冻结不可变测试，确认当前缺少实现。
-- [ ] 实现 `ToolSurfaceCatalog`；定义取 Registry 原始 Schema，不含 `_execution` 包装，不新建
+- [x] 先添加 Catalog 查组、常驻排除和冻结不可变测试，确认当前缺少实现。
+- [x] 实现 `ToolSurfaceCatalog`；定义取 Registry 原始 Schema，不含 `_execution` 包装，不新建
   `search_scoring.py`。
-- [ ] 添加搜索参数校验、目录输出、整组召回、未命中目录和 `tools_loaded` metadata 测试。
-- [ ] 实现 `ToolSearchTool`；参数校验镜像 `_MCPTool` 风格，目录条目为
+- [x] 添加搜索参数校验、目录输出、整组召回、未命中目录和 `tools_loaded` metadata 测试。
+- [x] 实现 `ToolSearchTool`；参数校验镜像 `_MCPTool` 风格，目录条目为
   `scope_id(N): tool1, tool2, ...`，description 直通，`can_run_parallel=True`。
-- [ ] 添加分发参数校验、未加载引导错误、已加载 unwrap、字段级 Schema 错误和 object 参数测试。
-- [ ] 实现 `ToolExecuteTool` 与 late-bind 接口；复用 MCP 已验证的 jsonschema 校验行为，但不得在
+- [x] 添加分发参数校验、未加载引导错误、已加载 unwrap、字段级 Schema 错误和 object 参数测试。
+- [x] 实现 `ToolExecuteTool` 与 late-bind 接口；复用 MCP 已验证的 jsonschema 校验行为，但不得在
   core 中 import MCPPlugin。
-- [ ] 验证 unwrap 后目标工具的真实身份贯穿既有执行、finalize、metadata、预算和 Hook 链路。
-- [ ] 运行三个新增测试文件，并核对 sync/async 行为一致。
+- [x] 验证 unwrap 后目标工具的真实身份贯穿既有执行、finalize、metadata、预算和 Hook 链路。
+- [x] 运行三个新增测试文件，并核对 sync/async 行为一致。
 
 ## 5. Phase 2：ReActAgent 加载名单循环
 
@@ -88,22 +88,24 @@ Provider 可插拔、MCP 动态通道独立，以及既有调用方的 `tools=No
 
 ### Steps
 
-- [ ] 先添加四路径测试：搜索结果的加载名在 finalize 后并入名单，后续 `tool_execute` 才放行。
-- [ ] 在 `_RunState` 增加有序 `loaded_tools`；不新增 Agent 入口参数，不把 Run 状态保存到工具实例。
-- [ ] `invoke` / `ainvoke` 接收工具组 finalize 返回值，`stream` / `astream` 使用内联 finalize 结果，
+- [x] 先添加四路径测试：搜索结果的加载名在 finalize 后并入名单，后续 `tool_execute` 才放行。
+- [x] 在 `_RunState` 增加有序 `loaded_tools`；不新增 Agent 入口参数，不把 Run 状态保存到工具实例。
+- [x] `invoke` / `ainvoke` 接收工具组 finalize 返回值，`stream` / `astream` 使用内联 finalize 结果，
   统一扫描 `metadata["tools_loaded"]`。
-- [ ] 新增名显式与可执行全集求交，再保序去重并入名单；不得依赖 `select` 的 skip-missing 行为代替
+- [x] 新增名显式与可执行全集求交，再保序去重并入名单；不得依赖 `select` 的 skip-missing 行为代替
   这层求交。
-- [ ] 将当前 Run 名单接入 `tool_execute` 硬门控；加载只增不减，跨 Run 重置。
-- [ ] 保持 `tool_definitions` 在 `_create_run_state` 快照一次，四路径均不得重建或修改定义数组。
-- [ ] 覆盖未加载硬门、白名单求交、重复搜索去重、跨 Run 重搜，以及 `tools=None` 既有行为不变。
-- [ ] 运行两个 ReAct 测试文件，确认四路径模型调用始终收到同一冻结定义。
+- [x] 将当前 Run 名单接入 `tool_execute` 硬门控；加载只增不减，跨 Run 重置。
+- [x] 保持 `tool_definitions` 在 `_create_run_state` 快照一次，四路径均不得重建或修改定义数组。
+- [x] 覆盖未加载硬门、白名单求交、重复搜索去重、跨 Run 重搜，以及 `tools=None` 既有行为不变。
+- [x] 运行两个 ReAct 测试文件，确认四路径模型调用始终收到同一冻结定义。
 
 ## 6. Phase 3：运行时装配（app 层接线）
 
 ### Files and interfaces
 
 - 修改 [session_runtime.py](apps/agent/src/agent_app/application/session_runtime.py)。
+- 将 [host.py](apps/agent/src/icarus/runtime/host.py) 的 `graph_snapshot` 生成前移到
+  `before_ready` 之前，使 `_finalize_links` 能消费同一份图快照；其余 READY 顺序不变。
 - 按实际装配接缝最小修改 [factory.py](apps/agent/src/agent_app/plugins/agent/factory.py)、
   [plugin.py](apps/agent/src/agent_app/plugins/agent/plugin.py) 和
   [config.py](apps/agent/src/agent_app/plugins/agent/config.py)；不得增加 config_model 可见性字段。
@@ -113,17 +115,17 @@ Provider 可插拔、MCP 动态通道独立，以及既有调用方的 `tools=No
 
 ### Steps
 
-- [ ] 先添加 Registry 名称、Catalog late-bind、目录定义和 AgentPlugin `tools=` 传参测试。
-- [ ] `SessionRuntime.__init__` 创建 Registry 后直接注册 `ToolSearchTool` 与 `ToolExecuteTool`；
+- [x] 先添加 Registry 名称、Catalog late-bind、目录定义和 AgentPlugin `tools=` 传参测试。
+- [x] `SessionRuntime.__init__` 创建 Registry 后直接注册 `ToolSearchTool` 与 `ToolExecuteTool`；
   单一属主、无 manifest、freeze 前完成。
-- [ ] `_finalize_links` 从 `host.graph` 快照的 `(tool_name, plugin_id)` 对构建 Catalog，READY 前
+- [x] `_finalize_links` 从 `host.graph` 快照的 `(tool_name, plugin_id)` 对构建 Catalog，READY 前
   late-bind 给搜索工具，并把全量 Registry late-bind 给分发工具。
-- [ ] 在 READY 前把功能面目录写入 `tool_search` 定义；不得在 Run 中更新目录或定义。
-- [ ] AgentPlugin 调 `astream` 时传入硬编码常驻 9 元组；与可执行全集求交，未注册项不阻断 Run。
-- [ ] Base Prompt 增加两行静态引导：需要面外能力先 `tool_search`；已加载工具经
+- [x] 在 READY 前把功能面目录写入 `tool_search` 定义；不得在 Run 中更新目录或定义。
+- [x] AgentPlugin 调 `astream` 时传入硬编码常驻 9 元组；与可执行全集求交，未注册项不阻断 Run。
+- [x] Base Prompt 增加两行静态引导：需要面外能力先 `tool_search`；已加载工具经
   `tool_execute(name, arguments)` 调用，新 Run 必须重新 search。
-- [ ] 保持 Skill Evolver 的 generation tools、manifest 和显式白名单行为不变，不增加专门 canary。
-- [ ] 运行 SessionRuntime 与 AgentPlugin 聚焦测试，再运行 Phase 1–2 测试排查接线回归。
+- [x] 保持 Skill Evolver 的 generation tools、manifest 和显式白名单行为不变，不增加专门 canary。
+- [x] 运行 SessionRuntime 与 AgentPlugin 聚焦测试，再运行 Phase 1–2 测试排查接线回归。
 
 ## 7. Phase 4：文档收尾
 
@@ -134,10 +136,10 @@ Provider 可插拔、MCP 动态通道独立，以及既有调用方的 `tools=No
 
 ### Steps
 
-- [ ] 将 `arch.md` 中已落地内容改为当前源码/测试事实，保留尚未实现项的明确状态。
-- [ ] 记录实际测试结果、设计偏差和未执行的 optional smoke；不把计划完成写成验证通过。
-- [ ] 检查 spec、源码命名和实际 Tool 描述一致，不留已作废的“Run 中重建 definitions”方案。
-- [ ] 运行最终全量验收和 `git diff --check`。
+- [x] 将 `arch.md` 中已落地内容改为当前源码/测试事实，保留尚未实现项的明确状态。
+- [x] 记录实际测试结果、设计偏差和未执行的 optional smoke；不把计划完成写成验证通过。
+- [x] 检查 spec、源码命名和实际 Tool 描述一致，不留已作废的“Run 中重建 definitions”方案。
+- [x] 运行最终全量验收和 `git diff --check`。
 
 ## 8. Acceptance
 
@@ -191,3 +193,41 @@ git diff --check
 - Phase 0 回滚只需在确认没有他人后续修改后移除本目录两份新文档，并恢复编排基础文档的新增段落。
 - 实现 Phase 按本次逻辑文件和测试的可审阅补丁反向恢复，保留既有会话数据、配置和其他工作区改动。
 - 不使用 `git reset --hard`、`git clean` 或覆盖式操作代替精确回滚；不自动执行任何 Git 历史变更。
+
+## 11. 实施验证记录
+
+验证日期：`2026-10-28`。当前 Windows 虚拟环境使用 `.venv/Scripts/python.exe`，而
+`apps/agent/scripts/test.sh` 固定查找 `.venv/bin/python`，因此未直接运行 `make test-agent`；
+使用同一虚拟环境直接执行其对应的 Agent 全量 pytest 与 compileall 检查。
+
+### 聚焦验收
+
+- Phase 1–3 的 core tools、ReActAgent 与 AgentPlugin 聚焦测试：`79 passed`。
+- SessionRuntime 的 READY 前 Catalog / Registry 绑定与双桥注册聚焦测试：`3 passed`。
+- `apps/agent/test/icarus/core/tools` 与 `apps/agent/test/icarus/core/agents`：
+  `114 passed, 1 failed`；唯一失败为 `test_tool_result_store原子保存session文本并限制权限`，
+  在 Windows 上断言 POSIX 文件权限，HEAD 基线同样失败。
+- `compileall -q apps/agent/src apps/agent/test packages`：通过。
+- `git diff --check`：通过；仅有既有文档的 CRLF/LF 提示，没有 whitespace error。
+
+### Agent 全量与 HEAD 基线对照
+
+两轮均使用同一虚拟环境，并设置 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`。基线由
+`git archive HEAD` 解到独立临时目录后运行，不修改当前工作区。
+
+| 对象 | 结果 |
+|---|---|
+| 当前工作区 | `1027 passed, 51 failed, 36 skipped, 2 warnings` |
+| HEAD 基线 | `1006 passed, 51 failed, 36 skipped, 1 warning` |
+
+按完整测试身份比较，两份 51 项失败清单完全一致，没有发现本次变更新增的失败；当前工作区增加的
+21 个通过项来自本次新增测试。既有失败分布于 SessionRuntime、runtime environment、Knowledge、
+Mem0、Persona、Prompt workspace source、Skill、ToolResultStore POSIX 权限、Capability handler 和
+packaging default persona resource。全量测试因此不能记录为通过，本次也未修复这些无关失败。
+
+### 未执行或未通过的检查
+
+- 可选真实模型 smoke 未执行：本轮没有另行获得真实模型调用授权，也未使用本地 fixture 冒充
+  真实模型结果。
+- 额外执行的聚焦 mypy 未形成类型验收：当前包缺少 `py.typed`，且环境未安装 `jsonschema`
+  类型 stubs，共报告 37 个 `import-untyped`；没有为本计划额外修改依赖或把该结果记为通过。

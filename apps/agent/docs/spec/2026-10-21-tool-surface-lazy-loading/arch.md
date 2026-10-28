@@ -1,9 +1,8 @@
 # Tool Surface Lazy Loading Architecture｜工具面延迟加载架构
 
-> 状态：Phase 0 设计已确认，Phase 1–4 尚未实施。第 2 节描述已核对的当前源码与测试；
-> 第 3 节起描述待实施的目标设计，不表示当前代码已经具备 `tool_search` / `tool_execute`。
-> 实施顺序与验收见 [plan.md](plan.md)，设计来源为
-> [eager-scribbling-pony.md](docs/plan/eager-scribbling-pony.md)。
+> 状态：Phase 0–4 的实现与文档已完成；验证结果见 [plan.md](plan.md)。可选真实模型 smoke 未执行。
+> 第 2 节记录实施前基线；第 3 节起描述当前源码与测试所确认的实现。
+> 设计来源为 [eager-scribbling-pony.md](docs/plan/eager-scribbling-pony.md)。
 
 ## 1. 文档定位与问题
 
@@ -19,7 +18,7 @@ relationship 工具时为 32 个。每次模型调用都携带全量定义，工
 其后的前缀缓存失效。本设计因此不采用 Run 中重建定义数组的方案，也不依赖特定厂商的动态工具声明通道；
 它只消除工具面对缓存的破坏，不等同于本期已经启用 prompt caching。
 
-## 2. 已验证的当前架构
+## 2. 实施前架构（Phase 0 基线）
 
 ### 2.1 工具注册与归属
 
@@ -69,7 +68,7 @@ SessionRuntime(tools)
 
 AgentPlugin 当前透传事件中的 `tools`，尚未施加默认 9 元组白名单；底层 `tools=None` 仍表示全部可见。
 
-## 3. 目标与不变量
+## 3. 实现目标与不变量
 
 ### 3.1 默认 Session 的常驻工具面
 
@@ -109,9 +108,9 @@ mcp_tool_execute
   Provider 分支。
 - MCP 动态工具继续走三个固定 MCP Tool 的自有通道，与统一工具面 Catalog 分离。
 
-## 4. 目标组件与所有权
+## 4. 组件与所有权
 
-| 组件 | 位置与所有者 | 目标职责 |
+| 组件 | 位置与所有者 | 当前职责 |
 |---|---|---|
 | `ToolSurfaceCatalog` | 新增于 `icarus.core.tools` | 从 `(tool_name, plugin_id)` 与 Registry 原始定义构建不可变快照；排除常驻 9 元组；按 `plugin_id` 精确返回整组定义 |
 | `ToolSearchTool` | 新增于 `icarus.core.tools`，由 SessionRuntime 直接注册 | 在定义描述中携带功能面目录；返回命中工具的完整说明与 Schema；通过 `metadata["tools_loaded"]` 报告本次加载名 |
@@ -139,7 +138,9 @@ mcp_tool_execute
 
 ### 5.2 功能面目录
 
-SessionRuntime 在 READY 前把目录写入 `tool_search` 的定义描述，条目形态固定为：
+SessionRuntime 在 READY 前把目录写入 `tool_search` 的定义描述。Runtime Host 先生成
+`graph_snapshot`，再调用 `before_ready`；SessionRuntime 在该钩子中消费快照的 `(tool_name, plugin_id)`，
+构建并绑定 Catalog 与全量 Registry，随后才冻结 Registry。条目形态固定为：
 
 ```text
 scope_id(N): tool1, tool2, ...
@@ -200,8 +201,11 @@ arguments: object
   可自愈的引导。
 - 参数校验复用 MCP 已验证的 jsonschema 校验行为，同时保持 core 不反向依赖 MCPPlugin。
 - Schema 校验失败返回模型可读的结构化字段级错误，包含出错字段、期望约束和实际值/类型。
-- 执行采用 unwrap 语义：目标工具以其真实名称进入既有执行、finalize、metadata、工具组预算和 Hook
-  链路，对外表现等同直接调用目标工具。
+- 执行采用 unwrap 语义：ReActAgent 只向 `tool_execute` 传入当前 Run 的 `loaded_tools`、原始
+  `ToolCall.id` 和全量 `BaseToolExecutor`。分发工具完成门控与 Schema 校验后，以目标名称和原调用 ID
+  进入全量执行器；目标工具因此沿用既有执行、finalize、metadata、工具组预算和 Hook 链路。
+- 外层快照执行器对 `tool_execute` 保持观测透明，不把分发入口再次记录为业务 Tool；Hook 只观察 unwrap
+  后的目标调用。工具实例不保存某个 Run 的名单或模型角色对应的执行器。
 - `tool_execute.can_run_parallel=True`，sync/async 行为一致。
 
 ### 6.3 跨 Run 与提示词
@@ -212,7 +216,7 @@ arguments: object
 
 ## 7. 兼容性、验证与回滚边界
 
-目标实现的 observable contracts：
+当前实现的 observable contracts：
 
 1. 四条 ReAct 路径中，每个模型 Step 收到同一份冻结定义；搜索加载后仍不发生定义重建。
 2. Catalog 查组、常驻排除和不可变性可由纯功能测试验证。

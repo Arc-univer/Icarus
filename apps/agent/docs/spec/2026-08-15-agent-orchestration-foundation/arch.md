@@ -186,7 +186,7 @@ flowchart TD
 `tool_definitions`，后续 LLM Step 复用这份定义。工具面延迟加载设计将这一行为明确强化为
 **单次 Run 内冻结快照**：不得因工具结果、加载状态或上下文变化而重建、增删或重排定义数组。
 
-默认 Session 的延迟加载目标设计通过 `tool_search` / `tool_execute` 双桥调整 Run 内执行门控，
+默认 Session 的延迟加载通过 `tool_search` / `tool_execute` 双桥调整 Run 内执行门控，
 不改变冻结数组；可见性变化也不等于 Registry 可执行性变化。详见
 [Tool Surface Lazy Loading Architecture](apps/agent/docs/spec/2026-10-21-tool-surface-lazy-loading/arch.md)。
 
