@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from icarus.core.models.messages import ToolDefinition
+from icarus.core.models.messages import Message, ToolDefinition
 from icarus.core.tools.base_tool import BaseTool
 from icarus.core.tools.tool_surface import ToolSurfaceCatalog
 from icarus.core.tools.types import ToolExecutionResult
@@ -46,7 +46,16 @@ class ToolSearchTool(BaseTool):
             },
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> ToolExecutionResult:
+    def invoke(
+        self,
+        arguments: dict[str, Any],
+        *,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        step: int | None = None,
+        task_messages: tuple[Message, ...] = (),
+    ) -> ToolExecutionResult:
+        del task_id, run_id, step, task_messages
         try:
             query = self._query(arguments)
         except Exception as error:
@@ -81,7 +90,16 @@ class ToolSearchTool(BaseTool):
             },
         )
 
-    async def ainvoke(self, arguments: dict[str, Any]) -> ToolExecutionResult:
+    async def ainvoke(
+        self,
+        arguments: dict[str, Any],
+        *,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        step: int | None = None,
+        task_messages: tuple[Message, ...] = (),
+    ) -> ToolExecutionResult:
+        del task_id, run_id, step, task_messages
         return self.invoke(arguments)
 
     def can_run_parallel(self, arguments: dict[str, Any]) -> bool:
